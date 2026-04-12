@@ -2,6 +2,8 @@
 
 > A production-grade multi-agent Artificial Intelligence system designed to provide expert-level clinical diagnostics for cattle, combining Computer Vision, Sensor Data, Retrieval-Augmented Generation (RAG), and a Neo4j Knowledge Graph.
 
+## Link for the recorded video of the project: "https://drive.google.com/file/d/1swrc3XNCtuZuuyqWYVfpY4bVbLOhUatK/view?usp=sharing"
+
 ![VETAI Dashboard Concept](https://img.shields.io/badge/AIE494-Final_Project-emerald?style=for-the-badge) ![Python](https://img.shields.io/badge/Python-3.11-blue?style=for-the-badge&logo=python) ![FastAPI](https://img.shields.io/badge/FastAPI-005571?style=for-the-badge&logo=fastapi) ![React](https://img.shields.io/badge/React-20232A?style=for-the-badge&logo=react&logoColor=61DAFB) ![Neo4j](https://img.shields.io/badge/Neo4j-008CC1?style=for-the-badge&logo=neo4j&logoColor=white) ![Docker](https://img.shields.io/badge/Docker-2496ED?style=for-the-badge&logo=docker&logoColor=white) 
 
 ## 🌟 Overview
