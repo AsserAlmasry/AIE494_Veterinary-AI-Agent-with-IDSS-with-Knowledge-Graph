@@ -1,0 +1,28 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+}
+
+.glass-card {
+  @apply bg-white/80 backdrop-blur-md border border-slate-200 shadow-sm rounded-xl overflow-hidden;
+}
+
+.health-border-healthy { @apply border-l-4 border-l-health-emerald; }
+.health-border-warning { @apply border-l-4 border-l-health-amber; }
+.health-border-critical { @apply border-l-4 border-l-health-rose; }
+
+/* Custom scrollbar for markdown */
+.prose-custom::-webkit-scrollbar {
+  width: 6px;
+}
+.prose-custom::-webkit-scrollbar-track {
+  @apply bg-slate-100;
+}
+.prose-custom::-webkit-scrollbar-thumb {
+  @apply bg-slate-300 rounded-full hover:bg-slate-400;
+}

@@ -1,0 +1,53 @@
+version: "3.9"
+
+services:
+  veterinary_ai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: veterinary_ai_api
+    image: veterinary-ai-system:latest
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./weights:/app/weights          # persistent model weights
+      - ./data:/app/data                # persistent vector store + KB cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    deploy:
+      resources:
+        limits:
+          memory: 8G
+        reservations:
+          memory: 4G
+
+  # Optional: Neo4j local instance for development
+  # Comment out if using Neo4j AuraDB (recommended for production)
+  neo4j:
+    image: neo4j:5.19
+    container_name: veterinary_neo4j
+    environment:
+      NEO4J_AUTH: "neo4j/your_local_password"
+      NEO4J_PLUGINS: '["apoc"]'
+    ports:
+      - "7474:7474"   # HTTP browser
+      - "7687:7687"   # Bolt
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+volumes:
+  neo4j_data:
+  neo4j_logs:
