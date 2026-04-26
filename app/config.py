@@ -1,82 +1,70 @@
 """
-app/config.py
-=============
-Centralised, environment-based configuration.
+app/config.py — Centralised, environment-based configuration.
 All secrets are read from .env — never hardcoded.
 """
-
 from __future__ import annotations
-
 import os
 from functools import lru_cache
 from typing import Optional
-
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """
-    All settings are read from environment variables / .env file.
-    Pydantic v2 handles type coercion + validation automatically.
-    """
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    # ── LLM (Groq) ──────────────────────────────────────────────────────────────
+    # ── LLM (Groq) ──────────────────────────────────────────────────────────
     groq_api_key: str
     groq_model: str = "llama-3.3-70b-versatile"
     groq_temperature: float = 0.1
     groq_max_tokens: int = 2048
 
-    # ── HuggingFace ─────────────────────────────────────────────────────────────
+    # ── HuggingFace ─────────────────────────────────────────────────────────
     hf_token: Optional[str] = None
 
-    # ── Neo4j ───────────────────────────────────────────────────────────────────
+    # ── Neo4j ───────────────────────────────────────────────────────────────
     neo4j_uri: str = "neo4j+s://43b30b0c.databases.neo4j.io"
     neo4j_user: str = "43b30b0c"
     neo4j_password: str
     neo4j_database: str = "43b30b0c"
 
-    # ── Model Weight URLs (Google Drive) ─────────────────────────────────────────
-    identity_model_url: str = "https://drive.google.com/uc?id=1xY5WAqYsh1pEfaMbSNPgFQKt_7nq5WeC"
-    disease_model_url: str = "https://drive.google.com/uc?id=1WEtfzuUFraiyPlcvRyQjW7aHpnkB8n45"
-    early_warning_model_url: str = "https://drive.google.com/uc?id=1GUFj7xy8s3snXNUh47_-cDpPab-E3uTm"
+    # ── MMCOWS Model Paths ──────────────────────────────────────────────────
+    mmcows_base_path: str = "."
+    mmcows_src_path: str = "."
+    mmcows_saved_models_dir: str = "./saved_models"
 
-    # ── Local Paths ──────────────────────────────────────────────────────────────
-    weights_dir: str = "./weights"
-    identity_model_name: str = "mmcows_yolo_identity.pt"
-    disease_model_name: str = "disease_classifier_maxvit.pt"
-    early_warning_model_name: str = "early_warning_healthrisk.pt"
+    # Individual model checkpoint names
+    identification_model_name: str = "identification_model.pt"
+    milk_prediction_model_name: str = "milk_prediction_model.pth"
+    behavior_model_name: str = "behavior_model.pth"
+    anomaly_model_name: str = "anomaly_autoencoder.pth"
+    fusion_model_name: str = "fusion_model.pth"
 
+    # ── MMCOWS Data Paths ───────────────────────────────────────────────────
+    mmcows_thi_data_path: str = "./preprocessing_results/thi_station_avg.csv"
+    mmcows_merged_data_path: str = "./preprocessing_results/merged_multimodal_T01_0721.csv"
+    mmcows_milk_data_path: str = "./preprocessing_results/milk_all_clean.csv"
+
+    # ── Local Data Paths ────────────────────────────────────────────────────
     data_dir: str = "./data"
     chroma_persist_dir: str = "./data/chroma_vet_rag"
-    identity_bank_path: str = "./data/identity_bank.pkl"
     kb_cache_path: str = "./data/pubmed_kb.json"
 
-    # ── Identity System ──────────────────────────────────────────────────────────
-    identity_similarity_threshold: float = 0.85
-    identity_embedding_dim: int = 768  # must match ViTEmbeddingExtractor.EMBEDDING_DIM
-    min_embeddings_per_cow: int = 3
-    max_embeddings_per_cow: int = 20
+    # ── Identity System ─────────────────────────────────────────────────────
+    identity_confidence_threshold: float = 0.65
 
-    # ── RAG ─────────────────────────────────────────────────────────────────────
+    # ── RAG ──────────────────────────────────────────────────────────────────
     rag_embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
     rag_chunk_size: int = 650
     rag_chunk_overlap: int = 80
     rag_top_k: int = 5
     rag_min_relevance_score: float = 0.55
 
-    # ── Safety ──────────────────────────────────────────────────────────────────
-    min_confidence_for_auto_diagnosis: float = 0.60  # lowered: calibrated heads need lower threshold
+    # ── Safety ───────────────────────────────────────────────────────────────
+    min_confidence_for_auto_diagnosis: float = 0.60
     require_weight_for_dosing: bool = True
     block_uncertain_recommendations: bool = True
 
-    # ── Application ─────────────────────────────────────────────────────────────
+    # ── Application ──────────────────────────────────────────────────────────
     app_env: str = "production"
     app_host: str = "0.0.0.0"
     app_port: int = 8000
@@ -84,30 +72,33 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     enable_detailed_logging: bool = False
 
-    # ── Performance ─────────────────────────────────────────────────────────────
+    # ── Performance ──────────────────────────────────────────────────────────
     enable_caching: bool = True
     cache_ttl_seconds: int = 3600
     max_parallel_workers: int = 4
-    stage1_timeout_ms: int = 1000
 
-    # ── Derived helpers ──────────────────────────────────────────────────────────
+    # ── Derived helpers ──────────────────────────────────────────────────────
     @property
-    def identity_model_path(self) -> str:
-        return os.path.join(self.weights_dir, self.identity_model_name)
-
-    @property
-    def disease_model_path(self) -> str:
-        return os.path.join(self.weights_dir, self.disease_model_name)
+    def identification_model_path(self) -> str:
+        return os.path.join(self.mmcows_saved_models_dir, self.identification_model_name)
 
     @property
-    def early_warning_model_path(self) -> str:
-        return os.path.join(self.weights_dir, self.early_warning_model_name)
+    def milk_prediction_model_path(self) -> str:
+        return os.path.join(self.mmcows_saved_models_dir, self.milk_prediction_model_name)
+
+    @property
+    def behavior_model_path(self) -> str:
+        return os.path.join(self.mmcows_saved_models_dir, self.behavior_model_name)
+
+    @property
+    def anomaly_model_path(self) -> str:
+        return os.path.join(self.mmcows_saved_models_dir, self.anomaly_model_name)
+
+    @property
+    def fusion_model_path(self) -> str:
+        return os.path.join(self.mmcows_saved_models_dir, self.fusion_model_name)
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Singleton settings instance.
-    Use ``get_settings()`` everywhere — never instantiate Settings() directly.
-    """
     return Settings()

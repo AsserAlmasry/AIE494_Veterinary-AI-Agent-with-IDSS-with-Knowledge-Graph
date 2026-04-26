@@ -32,55 +32,33 @@ class GroqLLMService:
     """
 
     SYSTEM_PROMPT = (
-        "You are an expert veterinary AI clinical decision support system (IDSS) "
-        "specialising in bovine (cattle) medicine. You provide evidence-based clinical "
-        "decision support to licensed veterinarians and trained farmers.\n\n"
+        "You are the Senior Veterinary AI Assistant, an expert in bovine clinical diagnostics. "
+        "Your mission is to provide structured, ID-specific clinical decision support.\n\n"
 
-        "CLINICAL KNOWLEDGE STANDARDS:\n"
-        "• Body Temperature normal range: 38.0–39.3°C. Fever: >39.5°C. Hyperthermia: >41.0°C.\n"
-        "• Heart Rate normal: 40–80 bpm. Respiratory Rate: 10–30 breaths/min.\n"
-        "• BCS (Edmonson 1–5): BCS <2.5 = undernutrition; BCS >4.0 = obesity risk.\n"
-        "• FAMACHA Score 1–5 (anaemia): ≥3 → anthelmintic treatment.\n"
-        "• SCC: <200k cells/mL = healthy; 200–400k = subclinical mastitis; >400k = clinical mastitis.\n"
-        "• Milk conductivity: 4–6 mS/cm normal; >7.5 mS/cm = mastitis indicator.\n"
-        "• Rumination: 7–10 h/day normal; <4 h/day = rumen dysfunction.\n"
-        "• Ketosis: BHBA >1.2 mmol/L (subclinical), >3.0 mmol/L (clinical).\n\n"
+    "MANDATORY REPORT STRUCTURE:\n"
+    "You MUST PROVIDE ONLY individual assessment blocks for each cow ID. DO NOT provide a general executive summary, herd summary, or evidence section at the top.\n\n"
+    "# INDIVIDUAL CASE ASSESSMENTS\n\n"
+    "### 🐄 COW #[ID]\n"
+    "- **Status**: [Health Score % / Risk Level]\n"
+    "- **Clinical Vitals**: [Weight, Age, Temp, Heart Rate]\n"
+    "- **Production Analysis**: [Milk Yield interpretation]\n"
+    "- **Diagnosis**: [Suspected condition based on 25%+ confidence. IMPORTANT: If 'anomaly_detected' is True or Risk Level is High, you MUST NOT state 'Healthy/Normal'. Instead, report the findings as a suspected clinical anomaly or specific disease.]\n"
+    "- **Management Plan**: [Specific actions for THIS cow only]\n"
+    "--- [End of block for this ID] ---\n\n"
 
-        "WEIGHT-BASED DOSING PROTOCOLS (use these to calculate doses when weight is provided):\n"
-        "• Penicillin G: 22,000 IU/kg IM BID\n"
-        "• Oxytetracycline LA: 11 mg/kg IM single dose\n"
-        "• Florfenicol: 20 mg/kg SC or 40 mg/kg IM single dose (BRD)\n"
-        "• Flunixin meglumine: 2.2 mg/kg IV/IM SID (max 5 days)\n"
-        "• Meloxicam: 0.5 mg/kg SC/IV SID\n"
-        "• Dexamethasone: 0.1–0.2 mg/kg IM/IV (acute inflammation)\n"
-        "• Thiamine: 10 mg/kg IV slowly then 5 mg/kg IM QID (polioencephalomalacia)\n"
-        "• Propylene glycol: 300 mL PO BID (ketosis, fixed dose)\n"
-        "• Calcium borogluconate: 400 mL 40% solution slow IV (milk fever, fixed)\n"
-        "• Magnesium sulphate: 200 mL 50% SC (hypomagnesaemia, fixed)\n"
-        "• Intramammary tubes: 1 tube/affected quarter (mastitis, NOT weight-based)\n"
-        "• Milk withdrawal — Penicillin: 3d; OTC LA: 0d; Flunixin: 36h; Meloxicam: min 3d\n"
-        "• Meat withdrawal — Penicillin: 28d; OTC LA: 28d; Flunixin: 4d; Florfenicol: 28d\n\n"
-
-        "MANDATORY CLINICAL RULES:\n"
-        "0. ABSOLUTE DOSING BLOCK: If the prompt indicates that 'Dosing is PROHIBITED' or 'safety_level' is 'blocked', "
-        "YOU MUST NOT mention any medication names, drug classes, or dosages. Focus ONLY on diagnostics and biosecurity.\n"
-        "1. HIGH/CRITICAL findings → recommend immediate vet examination within 24h.\n"
-        "2. When animal weight is provided AND dosing is allowed, CALCULATE AND SHOW the actual dose with arithmetic "
-        "(e.g. 'Flunixin: 2.2 mg/kg × 600 kg = 1,320 mg'). Include withdrawal periods.\n"
-        "3. NOTIFIABLE diseases (FMD, LSD, BSE) → immediate authority notification MANDATORY.\n"
-        "4. ZOONOTIC diseases → BIOSECURITY ALERT for farm workers (PPE, hygiene).\n"
-        "5. Cite evidence level: A=RCT/meta-analysis, B=observational, C=expert opinion.\n"
-        "6. If visual analysis (Groq Vision) is provided, it is the PRIMARY diagnostic evidence.\n"
-        "7. Always end with: 'This is AI-generated decision support. "
-        "Final decisions rest with the attending veterinarian.'\n"
-        "8. Include Clinical Urgency Score (1–10, 10=immediate life threat).\n"
-        "9. Format output in clear Markdown with clinical headings."
+    "RULES:\n"
+    "1. DO NOT use 'BovineIQ' branding.\n"
+    "2. DO NOT show any literature references, PubMed IDs, or 'Evidence Base' sections.\n"
+    "3. **STRICT CLINICAL GATE**: Only mention a specific disease if the confidence is **25% or higher**. However, if 'anomaly_detected' is True, you must acknowledge the anomaly regardless of specific disease confidence.\n"
+    "4. **FACTUAL VITALS ONLY**: DO NOT invent vitals. Use 'Not provided' if missing.\n"
+    "5. **RISK ALIGNMENT**: If the provided risk level is 'High' or an anomaly is detected, YOUR REPORT MUST REFLECT A CLINICAL CONCERN. DO NOT report the animal as healthy in these cases.\n"
+    "6. Always end each cow block with: 'AI-generated support. Final decisions by licensed veterinarians.'\n"
     )
 
     def __init__(
         self,
         api_key: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "llama-3.1-8b-instant",
         temperature: float = 0.1,
         max_tokens: int = 2048,
     ) -> None:
@@ -98,7 +76,7 @@ class GroqLLMService:
 
     def generate_clinical_report(
         self,
-        cow_id: int,
+        cow_ids: List[int],
         disease_predictions: List[Dict[str, Any]],
         risk_assessment: Dict[str, Any],
         rag_context: List[Dict[str, str]],
@@ -111,7 +89,7 @@ class GroqLLMService:
     ) -> Dict[str, str]:
         """Generate a structured IDSS clinical report using all available context."""
         prompt = self._build_idss_prompt(
-            cow_id=cow_id,
+            cow_ids=cow_ids,
             disease_predictions=disease_predictions,
             risk_assessment=risk_assessment,
             rag_context=rag_context,
@@ -136,7 +114,7 @@ class GroqLLMService:
             report_text = response.choices[0].message.content or ""
         except Exception as exc:
             logger.error(f"Groq API error: {exc}", exc_info=True)
-            report_text = self._fallback_report(cow_id, disease_predictions, risk_assessment)
+            report_text = self._fallback_report(cow_ids[0] if cow_ids else 0, disease_predictions, risk_assessment)
 
         summary       = self._extract_summary(report_text)
         urgency_score = self._extract_urgency_score(
@@ -154,6 +132,7 @@ class GroqLLMService:
         self,
         question: str,
         context: Optional[str] = None,
+        image_b64: Optional[str] = None,
     ) -> str:
         messages = [{"role": "system", "content": self.SYSTEM_PROMPT}]
         if context:
@@ -161,10 +140,37 @@ class GroqLLMService:
                 "role":    "system",
                 "content": f"Use the following veterinary evidence to answer:\n\n{context}",
             })
-        messages.append({"role": "user", "content": question})
+
+        user_content = []
+        if image_b64:
+            # Ensure proper prefix
+            if not image_b64.startswith("data:image"):
+                image_b64 = f"data:image/jpeg;base64,{image_b64}"
+            
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": image_b64}
+            })
+            user_content.append({
+                "type": "text",
+                "text": f"Study the attached cow image/crop and answer this clinical question: {question}"
+            })
+        else:
+            user_content = question
+
+        messages.append({"role": "user", "content": user_content})
+
         try:
+            # For vision, we use Llama 3.2 11B or 90B Vision if specified, 
+            # otherwise the default 70B Versatile (which might not support vision depending on the endpoint).
+            # Groq's 70B Versatile is text-only. 
+            # We must use a vision model for vision requests.
+            model_to_use = self.model
+            if image_b64:
+                model_to_use = "llama-3.2-11b-vision-preview"
+
             response = self._client.chat.completions.create(
-                model=self.model, messages=messages,
+                model=model_to_use, messages=messages,
                 temperature=self.temperature, max_tokens=self.max_tokens,
             )
             return response.choices[0].message.content or "Unable to generate response."
@@ -176,7 +182,7 @@ class GroqLLMService:
 
     def _build_idss_prompt(
         self,
-        cow_id: int,
+        cow_ids: List[int],
         disease_predictions: List[Dict],
         risk_assessment: Dict,
         rag_context: List[Dict],
@@ -223,42 +229,52 @@ class GroqLLMService:
         else:
             disease_section = "  No significant findings above threshold."
 
-        # ── Dosing safety logic ──────────────────────────────────────────────
-        dosing_section = ""
+        # ── Multi-Cow Clinical Summaries ──────────────────────────────────────
+        clinical_summaries_text = ""
+        summaries = risk_assessment.get("clinical_summaries", [])
+        ref_note = risk_assessment.get("refinement_note", "")
+        
         allow_dosing = (safety_status or {}).get("allow_dosing", True)
-        safety_level = (safety_status or {}).get("safety_level", "pass")
 
-        if animal_weight_kg and animal_weight_kg > 0 and allow_dosing:
-            w = animal_weight_kg
-            dosing_section = (
-                f"\n## PATIENT WEIGHT & DOSING CONTEXT\n"
-                f"**Animal Weight:** {w:.0f} kg\n"
-                f"**Pre-calculated Reference Doses for {w:.0f} kg animal:**\n"
-                f"  • Flunixin meglumine (NSAID): 2.2 × {w:.0f} = **{2.2*w:.0f} mg** IV/IM SID\n"
-                f"  • Meloxicam (NSAID): 0.5 × {w:.0f} = **{0.5*w:.0f} mg** SC/IV SID\n"
-                f"  • Penicillin G: 22,000 IU × {w:.0f} = **{22000*w/1000000:.1f} MIU** IM BID\n"
-                f"  • Oxytetracycline LA: 11 × {w:.0f} = **{11*w:.0f} mg** IM single dose\n"
-                f"  • Florfenicol (SC): 20 × {w:.0f} = **{20*w:.0f} mg** SC; (IM): {40*w:.0f} mg\n"
-                f"  • Thiamine: 10 × {w:.0f} = **{10*w:.0f} mg** IV (polioencephalomalacia)\n"
-                f"  • Dexamethasone: 0.1–0.2 × {w:.0f} = **{0.1*w:.0f}–{0.2*w:.0f} mg** IM/IV\n"
-                f"  *(Withdrawal periods apply — verify specific product label)*\n"
-                f"  *(Intramammary mastitis tubes: 1 per affected quarter — not weight-based)*"
-            )
-        elif not allow_dosing:
-            dosing_section = (
-                f"\n## PATIENT WEIGHT\n"
-                f"**Animal Weight:** {animal_weight_kg or 'Not provided'} kg\n"
-                f"**CRITICAL SAFETY BLOCK**: Dosing recommendations are PROHIBITED for this case "
-                f"due to { 'a notifiable disease suspicion' if (safety_status or {}).get('notifiable_diseases') else 'high clinical uncertainty' }.\n"
-                f"DO NOT mention any drugs, medication names, or dosages in the report."
-            )
+        if summaries:
+            clinical_summaries_text = "## INDIVIDUAL COW CLINICAL SUMMARIES\n"
+            for s in summaries:
+                cid = s.get("cow_id")
+                hs = s.get("health", {}).get("health_score", "N/A")
+                if isinstance(hs, float): hs = f"{hs:.2f}"
+                risk = s.get("health", {}).get("risk_level", "Unknown").upper()
+                milk = s.get("milk", {}).get("predicted_yield_kg", "N/A")
+                heat = s.get("heat_stress", {}).get("heat_stress_level", "N/A")
+                
+                # Check if this cow has refined vitals
+                is_refined = f"#{cid}" in ref_note
+                w = animal_weight_kg if is_refined else None
+                a = animal_age_years if is_refined else None
+                
+                vitals_text = ""
+                if w or a:
+                    vitals_text = f"  - **REFINED VITALS**: {f'{w}kg' if w else ''} {f'{a}y' if a else ''} (Manual Entry)\n"
+                    if w and allow_dosing:
+                        vitals_text += (
+                            f"  - **PRE-CALCULATED DOSES ({w}kg)**: \n"
+                            f"    • Flunixin: {2.2*w:.0f}mg | Meloxicam: {0.5*w:.0f}mg | Penicillin: {22000*w/1000000:.1f}MIU\n"
+                        )
 
-        # ── Risk section ──────────────────────────────────────────────────────
-        risk_factors = "\n".join(
-            f"  - **{f['feature'].replace('_',' ').title()}**: {f['current_value']} "
-            f"[{f['status'].upper()}] (attribution: {f['attribution_score']:.2f})"
-            for f in risk_assessment.get("top_risk_factors", [])
-        ) or "  No sensor data provided."
+                clinical_summaries_text += (
+                    f"### Cow #{cid}\n"
+                    f"- **Health Status**: {hs} ({risk} RISK)\n"
+                    f"{vitals_text}"
+                    f"- **Production**: {milk} kg/day\n"
+                    f"- **Environment**: {heat} Heat Stress\n\n"
+                )
+        else:
+            # Fallback for old risk_assessment
+            risk_factors = "\n".join(
+                f"  - **{f['feature'].replace('_',' ').title()}**: {f['current_value']} "
+                f"[{f['status'].upper()}] (attribution: {f['attribution_score']:.2f})"
+                for f in risk_assessment.get("top_risk_factors", [])
+            ) or "  No sensor data provided."
+            clinical_summaries_text = f"## RISK ASSESSMENT\n- **Overall Risk Score**: {risk_assessment.get('overall_risk_score', 0):.2f}/1.0\n- **Risk Level**: {risk_assessment.get('risk_level', 'unknown').upper()}\n## SENSOR RISK FACTORS\n{risk_factors}\n"
 
         # ── KG treatment protocols ────────────────────────────────────────────
         treatment_section = ""
@@ -334,46 +350,27 @@ class GroqLLMService:
             sensor_section = "\n## SENSOR READINGS\n" + "\n".join(lines)
 
         return (
-            f"Generate an expert-level IDSS veterinary clinical report for the following bovine case.\n\n"
-            f"## PATIENT\n"
-            f"- **Cow ID**: {cow_id}\n"
-            f"- **Age**: {f'{animal_age_years:.1f} years' if animal_age_years else 'Not provided'}\n"
-            f"- **Weight**: {f'{animal_weight_kg:.0f} kg' if animal_weight_kg else 'Not provided'}\n\n"
+            f"Generate an expert-level IDSS veterinary clinical report for the following bovine cases detected in the scene.\n\n"
+            f"## PATIENTS DETECTED\n"
+            f"- **Cow IDs**: {', '.join(f'#{cid}' for cid in cow_ids)}\n"
+            f"- **Refinement Info**: {risk_assessment.get('refinement_note', 'No manual refinement data provided.')}\n\n"
             f"{vision_section}\n\n"
             f"## AI MODEL DISEASE CLASSIFICATIONS (supplement to visual analysis)\n"
             f"{disease_section}\n\n"
-            f"## RISK ASSESSMENT\n"
-            f"- **Overall Risk Score**: {risk_assessment.get('overall_risk_score', 0):.2f}/1.0\n"
-            f"- **Risk Level**: {risk_assessment.get('risk_level', 'unknown').upper()}\n"
-            f"- **Uncertainty**: {risk_assessment.get('risk_uncertainty', 0):.4f}\n\n"
-            f"## SENSOR RISK FACTORS\n{risk_factors}\n"
+            f"{clinical_summaries_text}\n"
             f"{sensor_section}\n"
-            f"{dosing_section}\n"
             f"{treatment_section}\n"
             f"{progression_section}\n"
             f"{alert_section}\n"
             f"{history_section}\n\n"
-            f"## RETRIEVED PEER-REVIEWED EVIDENCE (PubMed + Neo4j, 2021-2026)\n"
-            f"{evidence_section}\n\n"
             f"## REPORT REQUIREMENTS\n"
-            f"Generate a complete expert IDSS clinical report with ALL sections:\n"
-            f"### 1. Executive Summary (2–3 sentences + Clinical Urgency Score /10)\n"
-            f"### 2. Primary Diagnosis (based on VISUAL ANALYSIS as primary evidence)\n"
-            f"   - State the most likely diagnosis based on what is VISUALLY OBSERVED\n"
-            f"   - Explain why the visual evidence supports this diagnosis\n"
-            f"### 3. Clinical Findings Interpretation (visual + sensor)\n"
-            f"### 4. Differential Diagnoses (ranked by likelihood)\n"
-            f"### 5. Recommended Diagnostic Tests\n"
-            f"### 6. Treatment Recommendations\n"
-            f"   - **Immediate (0–24h)**\n"
-            f"   - If animal weight provided: show CALCULATED DOSES with arithmetic\n"
-            f"   - Include withdrawal periods for milk and meat\n"
-            f"   - **Short-term management (1–7 days)**\n"
-            f"   - **Monitoring schedule**\n"
-            f"### 7. Evidence Base (cite [1][2][3] from retrieved literature)\n"
-            f"### 8. Biosecurity & Regulatory Notes\n"
-            f"### 9. Safety Disclaimer\n\n"
-            f"Format in Markdown. Be clinically precise, evidence-based, and actionable."
+            f"Generate ONLY the per-cow clinical assessments. DO NOT include a general herd summary or references.\n"
+            f"Each cow block MUST include:\n"
+            f"- Health status & risk\n"
+            f"- Clinical vitals interpretation\n"
+            f"- Diagnosis (ONLY if 50%+ confidence, else 'Healthy/Normal')\n"
+            f"- Specific management plan including weight-based doses (if weight provided)\n\n"
+            f"Format as Markdown."
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────

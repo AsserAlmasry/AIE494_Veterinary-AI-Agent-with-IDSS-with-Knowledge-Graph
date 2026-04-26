@@ -1,95 +1,96 @@
 """
-api/routes/predict.py
-======================
-POST /predict  — Full multi-modal veterinary prediction endpoint.
-Accepts image upload + optional sensor JSON, returns complete pipeline result.
+api/routes/predict.py — Full multi-modal veterinary prediction endpoint (v4).
+Handles cow validation, annotated image return, crop analysis, and auto-YOLO label resolution.
 """
-
 from __future__ import annotations
-
+from pathlib import Path
 from typing import Any, Dict, List, Optional
-
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
-
-from app.dependencies import get_pipeline
+from app.dependencies import get_pipeline, get_data_pipeline
 
 router = APIRouter()
 
 
-# ── Request / Response models ─────────────────────────────────────────────────
-
-class SensorData(BaseModel):
-    body_temp:          Optional[float] = Field(None, description="°C")
-    heart_rate:         Optional[float] = Field(None, description="bpm")
-    respiratory_rate:   Optional[float] = Field(None, description="breaths/min")
-    rumination_time:    Optional[float] = Field(None, description="minutes/day")
-    activity_level:     Optional[float] = Field(None, description="steps/day")
-    feed_intake:        Optional[float] = Field(None, description="kg/day")
-    water_intake:       Optional[float] = Field(None, description="litres/day")
-    milk_yield:         Optional[float] = Field(None, description="litres/day")
-    milk_conductivity:  Optional[float] = Field(None, description="mS/cm")
-    step_count:         Optional[float] = Field(None, description="steps/day")
-    lying_time:         Optional[float] = Field(None, description="hours/day")
-    weight_change:      Optional[float] = Field(None, description="kg (+ gain / - loss)")
-
-    def to_dict(self) -> Dict[str, float]:
-        return {k: v for k, v in self.dict().items() if v is not None}
-
-
 class PredictResponse(BaseModel):
-    cow_id:            int
-    success:           bool
-    total_latency_ms:  float
-    stages:            Dict[str, Any]
-    errors:            List[str]
-    pipeline_version:  str
+    cow_id: int
+    success: bool
+    total_latency_ms: float
+    stages: Dict[str, Any]
+    errors: List[str]
+    pipeline_version: str
 
 
-# ── Endpoints ─────────────────────────────────────────────────────────────────
+def _resolve_label_path(data_pipeline, image_filename: Optional[str], day_index: int) -> Optional[str]:
+    import logging, re
+    logger = logging.getLogger(__name__)
+    """
+    Auto-resolve the YOLO label file for a given image from the MMCOWS dataset.
+    This enables per-cow bounding boxes with ground-truth IDs.
+    """
+    if not data_pipeline or not image_filename:
+        return None
 
-@router.post(
-    "/predict",
-    response_model=PredictResponse,
-    summary="Full multi-modal prediction",
-    description=(
-        "Run the complete Veterinary AI pipeline:\n"
-        "1. Cow identity (YOLO + ViT embedding)\n"
-        "2. Disease classification (MaxViT)\n"
-        "3. Health risk prediction (Transformer)\n"
-        "4. RAG evidence retrieval (PubMed)\n"
-        "5. Clinical report generation (Groq Llama 3.3 70B)"
-    ),
-)
+    # Standardise filename: remove extension and any browser-added suffixes like (1)
+    img_stem = Path(image_filename).stem
+    img_stem = re.sub(r"\s*\(\d+\)$", "", img_stem) # Remove " (1)"
+    img_stem = img_stem.replace(".jpg", "").replace(".png", "")
+    
+    logger.info(f"_resolve_label_path: Attempting to resolve label for '{img_stem}'")
+
+    # If it matches MMCOWS pattern (10 digits + timestamp) or is just digits
+    is_dataset_format = re.match(r"^\d{10}_\d{2}-\d{2}-\d{2}$", img_stem) or img_stem.isdigit()
+    
+    labels_dir = data_pipeline.visual / "labels" / "combined"
+    if labels_dir.exists():
+        # First try exact match
+        matches = list(labels_dir.rglob(f"{img_stem}.txt"))
+        
+        # If no exact match and not in standard format, try partial matches
+        if not matches and not is_dataset_format:
+            logger.info(f"_resolve_label_path: No exact match for '{img_stem}'. Searching for partial matches...")
+            for lp in labels_dir.rglob("*.txt"):
+                if lp.stem in img_stem or img_stem in lp.stem:
+                    matches = [lp]
+                    break
+        
+        if matches:
+            path = str(matches[0].absolute())
+            logger.info(f"_resolve_label_path: FOUND label at {path}")
+            return path
+            
+    return None
+
+
+@router.post("/predict", response_model=PredictResponse, summary="Full multi-modal prediction")
 async def predict(
     image: Optional[UploadFile] = File(None, description="Cattle image (JPEG/PNG)"),
-    sensor_json: Optional[str] = Form(None, description="JSON-encoded SensorData"),
+    sensor_json: Optional[str] = Form(None, description="JSON-encoded sensor data"),
     animal_weight_kg: Optional[float] = Form(None),
-    animal_age_years: Optional[float] = Form(None, description="Animal age in years"),
-    cow_id_override: Optional[int] = Form(None, description="Skip identity; use this cow ID"),
-    generate_report: bool = Form(True, description="Generate Groq LLM clinical report"),
+    animal_age_years: Optional[float] = Form(None),
+    cow_id_override: Optional[int] = Form(None, description="Manual cow ID override"),
+    day_index: int = Form(0, description="MMCOWS day index (0-13)"),
+    generate_report: bool = Form(True),
     pipeline=Depends(get_pipeline),
+    data_pipeline=Depends(get_data_pipeline),
 ) -> PredictResponse:
-    # Normalise Swagger placeholder values: 0 means "not provided"
-    if cow_id_override is not None and cow_id_override <= 0:
-        cow_id_override = None
-    if animal_weight_kg is not None and animal_weight_kg <= 0:
-        animal_weight_kg = None
-    if animal_age_years is not None and animal_age_years <= 0:
-        animal_age_years = None
+    # Normalise zero values
+    if cow_id_override is not None and cow_id_override <= 0: cow_id_override = None
+    if animal_weight_kg is not None and animal_weight_kg <= 0: animal_weight_kg = None
+    if animal_age_years is not None and animal_age_years <= 0: animal_age_years = None
+
     image_bytes: Optional[bytes] = None
+    image_filename: Optional[str] = None
     if image and image.filename:
         if not image.content_type or not image.content_type.startswith("image/"):
             raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
         image_bytes = await image.read()
+        image_filename = image.filename
 
     sensor_data: Optional[Dict[str, float]] = None
     if sensor_json:
-        # Ignore Swagger UI placeholder values that are not valid JSON objects/arrays
         stripped = sensor_json.strip()
-        if not (stripped.startswith("{") or stripped.startswith("[")):
-            sensor_json = None  # treat non-JSON strings as "not provided"
-        else:
+        if stripped.startswith("{") or stripped.startswith("["):
             try:
                 import json
                 raw = json.loads(sensor_json)
@@ -98,46 +99,42 @@ async def predict(
                 raise HTTPException(status_code=422, detail=f"Invalid sensor_json: {exc}")
 
     if image_bytes is None and sensor_data is None:
-        raise HTTPException(
-            status_code=422,
-            detail="At least one of 'image' or 'sensor_json' must be provided.",
-        )
+        raise HTTPException(status_code=422, detail="At least one of 'image' or 'sensor_json' must be provided.")
+
+    # Auto-resolve YOLO label path for bounding boxes
+    label_path = _resolve_label_path(data_pipeline, image_filename, day_index)
 
     result = await pipeline.run_full_pipeline(
-        image_bytes=image_bytes,
-        sensor_data=sensor_data,
-        animal_weight_kg=animal_weight_kg,
-        animal_age_years=animal_age_years,
-        cow_id_override=cow_id_override,
-        generate_report=generate_report,
+        image_bytes=image_bytes, sensor_data=sensor_data,
+        animal_weight_kg=animal_weight_kg, animal_age_years=animal_age_years,
+        cow_id_override=cow_id_override, day_index=day_index,
+        generate_report=generate_report, label_path=label_path,
     )
     return PredictResponse(**result)
 
 
-@router.post(
-    "/predict/risk",
-    summary="Sensor-only risk prediction",
-    description="Predict health risk from sensor data without requiring an image.",
-)
-async def predict_risk(
-    sensor: SensorData,
-    cow_id: Optional[int] = None,
+class CropAnalysisRequest(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+    description: str = ""
+
+
+@router.post("/predict/crop", summary="Analyze a cropped region of a cow image")
+async def analyze_crop(
+    image: UploadFile = File(..., description="Full cattle image"),
+    x: int = Form(...), y: int = Form(...),
+    width: int = Form(...), height: int = Form(...),
+    description: str = Form(""),
     pipeline=Depends(get_pipeline),
 ) -> Dict[str, Any]:
-    sensor_dict = sensor.to_dict()
-    if not sensor_dict:
-        raise HTTPException(status_code=422, detail="No sensor readings provided.")
-    return await pipeline.run_risk_only(
-        sensor_data=sensor_dict,
-        cow_id=cow_id,
-    )
+    image_bytes = await image.read()
+    crop_region = {"x": x, "y": y, "width": width, "height": height}
+    return await pipeline.analyze_crop(image_bytes, crop_region, description)
 
 
-@router.post(
-    "/predict/disease",
-    summary="Image-only disease classification",
-    description="Classify cattle diseases from an image (no sensor data required).",
-)
+@router.post("/predict/disease", summary="Image-only disease classification")
 async def predict_disease(
     image: UploadFile = File(..., description="Cattle image (JPEG/PNG)"),
     pipeline=Depends(get_pipeline),
@@ -145,4 +142,8 @@ async def predict_disease(
     if not image.content_type or not image.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Uploaded file must be an image.")
     image_bytes = await image.read()
-    return await pipeline.run_disease_only(image_bytes=image_bytes)
+    import io
+    from PIL import Image
+    pil_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    result = pipeline.cow_identifier.identify(pil_img)
+    return result

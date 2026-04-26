@@ -1,343 +1,294 @@
 """
-services/neo4j_service.py
-==========================
-Neo4j Aura DB service — knowledge graph queries for clinical decision support.
-Wraps the official neo4j Python driver.  Connection is pooled + reusable.
+services/neo4j_service.py — Clinical-Decision Knowledge Graph Service
+=====================================================================
+Fully redesigned for actionable veterinary decision support.
 
-v2: Added treatment protocol queries, contraindication checking, progression risk,
-    zoonotic info, and auto-recording of pipeline diagnoses.
+New schema replaces academic citation relationships with clinical-decision edges:
+  PRESENTS_WITH, TREATED_WITH, PROGRESSES_TO, CONTRAINDICATES,
+  DIFFERENTIAL_OF, INDICATES_RISK_FOR, ABNORMAL_INDICATES,
+  HAS_HEALTH_RECORD, DIAGNOSED_WITH
 """
-
 from __future__ import annotations
-
 import logging
-from contextlib import contextmanager
 from typing import Any, Dict, List, Optional
-
 logger = logging.getLogger(__name__)
 
 
 class Neo4jService:
-    """
-    Read/write interface to the veterinary knowledge graph on Neo4j AuraDB.
+    """Thread-safe Neo4j wrapper with clinical-decision graph operations."""
 
-    Schema
-    ------
-    (:Disease)   -[:HAS_SYMPTOM]->    (:Symptom)
-    (:Disease)   -[:TREATED_BY]->     (:Treatment)
-    (:Treatment) -[:REQUIRES_DRUG]->  (:Drug)
-    (:Disease)   -[:RELATED_TO]->     (:Disease)
-    (:Disease)   -[:PROGRESSES_TO]->  (:Disease)
-    (:Cow)       -[:HAS_CASE]->       (:Case)
-    (:Case)      -[:DIAGNOSED_AS]->   (:Disease)
-    (:Research)  -[:ABOUT]->          (:Disease)
-    """
-
-    def __init__(
-        self,
-        uri: str,
-        user: str,
-        password: str,
-        database: str = "neo4j",
-    ) -> None:
-        self.database = database
+    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
         self._driver = None
-        self._connected = False
+        self._database = database
+        self._mock_history = {}  # Fallback history storage
         try:
             from neo4j import GraphDatabase
             self._driver = GraphDatabase.driver(uri, auth=(user, password))
             self._driver.verify_connectivity()
-            self._connected = True
-            self._ensure_schema()
-            logger.info(f"Neo4jService connected to {uri}")
-        except Exception as exc:
-            logger.warning(
-                f"Neo4j connection failed: {exc}. "
-                "Knowledge graph features will be disabled."
+            logger.info(f"Neo4j connected: {uri}")
+        except Exception as e:
+            logger.warning(f"Neo4j connection failed: {e}. Using IN-MEMORY fallback graph.")
+            self._driver = None
+
+    def close(self):
+        if self._driver: self._driver.close()
+
+    def _run(self, query: str, **params) -> List[Dict]:
+        if not self._driver: return []
+        try:
+            with self._driver.session(database=self._database) as session:
+                result = session.run(query, **params)
+                return [dict(r) for r in result]
+        except Exception as e:
+            logger.warning(f"Neo4j query error: {e}")
+            return []
+
+    # ── Schema Initialization ─────────────────────────────────────────────────
+
+    def initialize_clinical_schema(self):
+        """Seed the knowledge graph with bovine disease ontology."""
+        diseases = self._get_disease_ontology()
+        for d in diseases:
+            self._run(
+                "MERGE (dis:Disease {name: $name}) "
+                "SET dis.category = $cat, dis.severity = $sev, dis.notifiable = $notif, dis.zoonotic = $zoo",
+                name=d["name"], cat=d["category"], sev=d["severity"],
+                notif=d.get("notifiable", False), zoo=d.get("zoonotic", False),
+            )
+            for sym in d.get("symptoms", []):
+                self._run(
+                    "MERGE (s:Symptom {name: $sn}) "
+                    "WITH s MATCH (dis:Disease {name: $dn}) "
+                    "MERGE (dis)-[:PRESENTS_WITH {body_part: $bp, visual: $vis}]->(s)",
+                    sn=sym["name"], dn=d["name"], bp=sym.get("body_part", ""), vis=sym.get("visual", True),
+                )
+            for tx in d.get("treatments", []):
+                self._run(
+                    "MERGE (t:Treatment {name: $tn}) "
+                    "SET t.drug = $drug, t.dosage = $dose, t.evidence = $ev "
+                    "WITH t MATCH (dis:Disease {name: $dn}) "
+                    "MERGE (dis)-[:TREATED_WITH {evidence_level: $ev, protocol: $proto}]->(t)",
+                    tn=tx["name"], drug=tx.get("drug", ""), dose=tx.get("dosage", ""),
+                    ev=tx.get("evidence_level", "C"), dn=d["name"], proto=tx.get("protocol", ""),
+                )
+                if tx.get("withdrawal_milk") or tx.get("withdrawal_meat"):
+                    self._run(
+                        "MATCH (t:Treatment {name: $tn}) "
+                        "MERGE (w:WithdrawalPeriod {treatment: $tn}) "
+                        "SET w.milk_days = $mk, w.meat_days = $mt "
+                        "MERGE (t)-[:HAS_WITHDRAWAL]->(w)",
+                        tn=tx["name"], mk=tx.get("withdrawal_milk", 0), mt=tx.get("withdrawal_meat", 0),
+                    )
+            for prog in d.get("progressions", []):
+                self._run(
+                    "MATCH (d1:Disease {name: $from}) "
+                    "MERGE (d2:Disease {name: $to}) "
+                    "MERGE (d1)-[:PROGRESSES_TO {probability: $prob, time_days: $td}]->(d2)",
+                    **{"from": d["name"], "to": prog["to"], "prob": prog["probability"], "td": prog["time_days"]},
+                )
+            for diff in d.get("differentials", []):
+                self._run(
+                    "MATCH (d1:Disease {name: $from}) "
+                    "MERGE (d2:Disease {name: $to}) "
+                    "MERGE (d1)-[:DIFFERENTIAL_OF {factors: $fac}]->(d2)",
+                    **{"from": d["name"], "to": diff["disease"], "fac": diff.get("factors", "")},
+                )
+        # Sensor → Disease mappings
+        for s in self._get_sensor_disease_mappings():
+            self._run(
+                "MERGE (sen:Sensor {name: $sn, unit: $unit}) "
+                "WITH sen MATCH (dis:Disease {name: $dn}) "
+                "MERGE (sen)-[:ABNORMAL_INDICATES {direction: $dir, threshold: $thr}]->(dis)",
+                sn=s["sensor"], unit=s["unit"], dn=s["disease"], dir=s["direction"], thr=s["threshold"],
+            )
+        logger.info("Clinical knowledge graph schema initialized")
+
+    # ── Query Methods ─────────────────────────────────────────────────────────
+
+    def get_disease_context(self, disease: str) -> Optional[Dict]:
+        disease = disease.lower().replace(" ", "_")
+        if not self._driver:
+            # IN-MEMORY FALLBACK
+            for d in self._get_disease_ontology():
+                if d["name"] == disease:
+                    return d
+            return None
+
+        rows = self._run(
+            "MATCH (d:Disease {name: $n}) "
+            "OPTIONAL MATCH (d)-[r1:PRESENTS_WITH]->(s:Symptom) "
+            "OPTIONAL MATCH (d)-[r2:TREATED_WITH]->(t:Treatment) "
+            "OPTIONAL MATCH (d)-[r3:PROGRESSES_TO]->(d2:Disease) "
+            "RETURN d, collect(DISTINCT {symptom: s.name, body_part: r1.body_part}) as symptoms, "
+            "collect(DISTINCT {treatment: t.name, drug: t.drug, dosage: t.dosage, evidence: r2.evidence_level, protocol: r2.protocol}) as treatments, "
+            "collect(DISTINCT {disease: d2.name, probability: r3.probability, time_days: r3.time_days}) as progressions",
+            n=disease,
+        )
+        if not rows: return None
+        r = rows[0]
+        d = dict(r["d"]) if r.get("d") else {}
+        return {
+            **d,
+            "symptoms": [s for s in r.get("symptoms", []) if s.get("symptom")],
+            "treatments": [t for t in r.get("treatments", []) if t.get("treatment")],
+            "progressions": [p for p in r.get("progressions", []) if p.get("disease")],
+        }
+
+    def get_treatment_protocol(self, disease: str) -> List[Dict]:
+        disease = disease.lower().replace(" ", "_")
+        if not self._driver:
+            # IN-MEMORY FALLBACK
+            for d in self._get_disease_ontology():
+                if d["name"] == disease:
+                    return d.get("treatments", [])
+            return []
+
+        return self._run(
+            "MATCH (d:Disease {name: $n})-[r:TREATED_WITH]->(t:Treatment) "
+            "OPTIONAL MATCH (t)-[:HAS_WITHDRAWAL]->(w:WithdrawalPeriod) "
+            "RETURN t.name as treatment, t.drug as drug, t.dosage as dosage, "
+            "r.evidence_level as evidence_level, r.protocol as protocol, "
+            "w.milk_days as withdrawal_milk_days, w.meat_days as withdrawal_meat_days",
+            n=disease,
+        )
+
+    def get_related_diseases(self, disease: str) -> List[Dict]:
+        disease = disease.lower().replace(" ", "_")
+        if not self._driver:
+            # IN-MEMORY FALLBACK
+            for d in self._get_disease_ontology():
+                if d["name"] == disease:
+                    return [{"disease": diff["disease"], "category": "unknown", "severity": "unknown"} for diff in d.get("differentials", [])]
+            return []
+
+        return self._run(
+            "MATCH (d:Disease {name: $n})-[:DIFFERENTIAL_OF]-(d2:Disease) "
+            "RETURN d2.name as disease, d2.category as category, d2.severity as severity "
+            "LIMIT 5", n=disease,
+        )
+
+    def get_cow_history(self, cow_id: int) -> List[Dict]:
+        if not self._driver:
+            return self._mock_history.get(cow_id, [])
+
+        return self._run(
+            "MATCH (c:Cow {cow_id: $cid})-[:DIAGNOSED_WITH]->(diag:Diagnosis) "
+            "RETURN diag.disease as disease, diag.confidence as confidence, "
+            "diag.timestamp as timestamp, diag.method as method "
+            "ORDER BY diag.timestamp DESC LIMIT 10", cid=cow_id,
+        )
+
+    def upsert_cow_case(self, cow_id: int, disease: str, confidence: float,
+                        health_score: float = None, milk_yield: float = None, method: str = "pipeline"):
+        """Record a diagnosis in the knowledge graph."""
+        import datetime
+        if not self._driver:
+            if cow_id not in self._mock_history:
+                self._mock_history[cow_id] = []
+            self._mock_history[cow_id].insert(0, {
+                "disease": disease, "confidence": confidence, 
+                "timestamp": str(datetime.datetime.now()), "method": method
+            })
+            return
+
+        self._run(
+            "MERGE (c:Cow {cow_id: $cid}) "
+            "CREATE (d:Diagnosis {disease: $dis, confidence: $conf, method: $meth, timestamp: datetime()}) "
+            "MERGE (c)-[:DIAGNOSED_WITH]->(d)",
+            cid=cow_id, dis=disease, conf=confidence, meth=method,
+        )
+        if health_score is not None:
+            self._run(
+                "MATCH (c:Cow {cow_id: $cid}) "
+                "CREATE (h:HealthRecord {health_score: $hs, milk_yield: $mk, timestamp: datetime()}) "
+                "MERGE (c)-[:HAS_HEALTH_RECORD]->(h)",
+                cid=cow_id, hs=health_score, mk=milk_yield,
             )
 
-    # ── Connection management ─────────────────────────────────────────────────
+    def get_sensor_risk_indicators(self, sensor_name: str) -> List[Dict]:
+        if not self._driver:
+            # IN-MEMORY FALLBACK
+            return [s for s in self._get_sensor_disease_mappings() if s["sensor"] == sensor_name]
 
-    @contextmanager
-    def _session(self):
-        if not self._connected or self._driver is None:
-            yield None
-            return
-        with self._driver.session(database=self.database) as session:
-            yield session
+        return self._run(
+            "MATCH (s:Sensor {name: $sn})-[r:ABNORMAL_INDICATES]->(d:Disease) "
+            "RETURN d.name as disease, r.direction as direction, r.threshold as threshold",
+            sn=sensor_name,
+        )
 
-    def close(self) -> None:
-        if self._driver:
-            self._driver.close()
-            logger.info("Neo4j connection closed")
+    def get_graph_stats(self) -> Dict[str, Any]:
+        try:
+            rows = self._run(
+                "MATCH (n) RETURN labels(n)[0] as label, count(n) as cnt "
+                "UNION ALL MATCH ()-[r]->() RETURN type(r) as label, count(r) as cnt"
+            )
+            stats = {"connected": True}
+            for r in rows: stats[r["label"]] = r["cnt"]
+            return stats
+        except: return {"connected": False}
 
-    # ── Schema ────────────────────────────────────────────────────────────────
+    # ── Disease Ontology Data ─────────────────────────────────────────────────
 
-    def _ensure_schema(self) -> None:
-        constraints = [
-            "CREATE CONSTRAINT disease_name_unique IF NOT EXISTS FOR (d:Disease)   REQUIRE d.name IS UNIQUE",
-            "CREATE CONSTRAINT symptom_name_unique IF NOT EXISTS FOR (s:Symptom)   REQUIRE s.name IS UNIQUE",
-            "CREATE CONSTRAINT treatment_name_unique IF NOT EXISTS FOR (t:Treatment) REQUIRE t.name IS UNIQUE",
-            "CREATE CONSTRAINT cow_id_unique IF NOT EXISTS FOR (c:Cow)             REQUIRE c.cow_id IS UNIQUE",
-            "CREATE CONSTRAINT drug_name_unique IF NOT EXISTS FOR (g:Drug)         REQUIRE g.name IS UNIQUE",
-            "CREATE CONSTRAINT research_pmid_unique IF NOT EXISTS FOR (r:Research) REQUIRE r.pmid IS UNIQUE",
+    @staticmethod
+    def _get_disease_ontology() -> List[Dict]:
+        return [
+            {"name": "mastitis", "category": "udder", "severity": "moderate",
+             "symptoms": [{"name": "swollen_udder", "body_part": "udder"}, {"name": "abnormal_milk", "body_part": "udder"}, {"name": "fever"}],
+             "treatments": [
+                 {"name": "intramammary_antibiotics", "drug": "Cephapirin", "dosage": "1 tube/quarter", "evidence_level": "A", "withdrawal_milk": 3, "withdrawal_meat": 4},
+                 {"name": "flunixin_nsaid", "drug": "Flunixin meglumine", "dosage": "2.2 mg/kg IV SID", "evidence_level": "A", "withdrawal_milk": 1.5, "withdrawal_meat": 4},
+             ],
+             "progressions": [{"to": "septicemia", "probability": 0.05, "time_days": 3}],
+             "differentials": [{"disease": "udder_edema", "factors": "No bacteria in milk culture"}]},
+            {"name": "lameness", "category": "musculoskeletal", "severity": "moderate",
+             "symptoms": [{"name": "abnormal_gait", "body_part": "limb"}, {"name": "reluctance_to_move", "body_part": "limb"}],
+             "treatments": [
+                 {"name": "hoof_trimming", "evidence_level": "A", "protocol": "Functional trimming by trained operator"},
+                 {"name": "meloxicam_nsaid", "drug": "Meloxicam", "dosage": "0.5 mg/kg SC SID", "evidence_level": "A", "withdrawal_milk": 3, "withdrawal_meat": 15},
+             ],
+             "differentials": [{"disease": "foot_rot", "factors": "Interdigital swelling and odor"}]},
+            {"name": "bovine_respiratory_disease", "category": "respiratory", "severity": "high",
+             "symptoms": [{"name": "cough"}, {"name": "nasal_discharge"}, {"name": "fever"}, {"name": "lethargy"}],
+             "treatments": [
+                 {"name": "florfenicol", "drug": "Florfenicol", "dosage": "20 mg/kg SC", "evidence_level": "A", "withdrawal_milk": 0, "withdrawal_meat": 28},
+                 {"name": "tulathromycin", "drug": "Tulathromycin", "dosage": "2.5 mg/kg SC single", "evidence_level": "A", "withdrawal_milk": 0, "withdrawal_meat": 18},
+             ],
+             "progressions": [{"to": "pneumonia", "probability": 0.3, "time_days": 5}]},
+            {"name": "ketosis", "category": "metabolic", "severity": "moderate",
+             "symptoms": [{"name": "decreased_appetite"}, {"name": "weight_loss"}, {"name": "decreased_milk"}],
+             "treatments": [
+                 {"name": "propylene_glycol", "drug": "Propylene glycol", "dosage": "300 mL PO BID", "evidence_level": "A"},
+                 {"name": "dexamethasone", "drug": "Dexamethasone", "dosage": "0.1 mg/kg IM", "evidence_level": "B", "withdrawal_milk": 0, "withdrawal_meat": 0},
+             ]},
+            {"name": "foot_mouth_disease", "category": "viral", "severity": "critical", "notifiable": True, "zoonotic": True,
+             "symptoms": [{"name": "oral_lesion", "body_part": "mouth"}, {"name": "hoof_lesion", "body_part": "hoof"}, {"name": "drooling"}, {"name": "fever"}],
+             "treatments": [{"name": "quarantine_protocol", "evidence_level": "A", "protocol": "Immediate isolation, authority notification"}],
+             "differentials": [{"disease": "vesicular_stomatitis", "factors": "Serology differentiation required"}]},
+            {"name": "lumpy_skin_disease", "category": "viral", "severity": "critical", "notifiable": True,
+             "symptoms": [{"name": "skin_nodules", "body_part": "skin"}, {"name": "fever"}, {"name": "lymph_node_swelling"}],
+             "treatments": [{"name": "vaccination_lsd", "evidence_level": "A", "protocol": "Live attenuated vaccine, ring vaccination"}]},
+            {"name": "heat_stress", "category": "environmental", "severity": "variable",
+             "symptoms": [{"name": "panting"}, {"name": "drooling"}, {"name": "decreased_appetite"}, {"name": "increased_water"}],
+             "treatments": [
+                 {"name": "cooling_protocol", "evidence_level": "A", "protocol": "Shade, fans, water misting, cold water access"},
+                 {"name": "electrolyte_therapy", "drug": "Oral electrolytes", "evidence_level": "B"},
+             ]},
+            {"name": "milk_fever", "category": "metabolic", "severity": "high",
+             "symptoms": [{"name": "recumbency"}, {"name": "muscle_tremors"}, {"name": "cold_ears"}],
+             "treatments": [
+                 {"name": "calcium_borogluconate", "drug": "Ca borogluconate 40%", "dosage": "400 mL slow IV", "evidence_level": "A"},
+             ],
+             "progressions": [{"to": "downer_cow_syndrome", "probability": 0.15, "time_days": 1}]},
         ]
-        with self._session() as session:
-            if session is None:
-                return
-            for cql in constraints:
-                try:
-                    session.run(cql)
-                except Exception as exc:
-                    if "already exists" not in str(exc).lower():
-                        logger.warning(f"Schema constraint: {exc}")
 
-    # ── Primary disease context ───────────────────────────────────────────────
-
-    def get_disease_context(self, disease_name: str) -> Dict[str, Any]:
-        """Retrieve symptoms, treatments, and related cases for a disease."""
-        with self._session() as session:
-            if session is None:
-                return {}
-            try:
-                result = session.run(
-                    """
-                    MATCH (dis:Disease {name: $disease})
-                    OPTIONAL MATCH (dis)-[:HAS_SYMPTOM]->(sym:Symptom)
-                    OPTIONAL MATCH (dis)-[:TREATED_BY]->(trt:Treatment)
-                    OPTIONAL MATCH (cs:Case)-[:DIAGNOSED_AS]->(dis)
-                    RETURN
-                        dis.name           AS disease,
-                        dis.severity       AS severity,
-                        dis.zoonotic       AS zoonotic,
-                        dis.notifiable     AS notifiable,
-                        dis.description    AS description,
-                        dis.prevalence_pct AS prevalence_pct,
-                        dis.mortality_risk AS mortality_risk,
-                        collect(DISTINCT sym.name) AS symptoms,
-                        collect(DISTINCT trt.name) AS treatments,
-                        count(DISTINCT cs)          AS case_count
-                    """,
-                    disease=disease_name,
-                )
-                record = result.single()
-                if record:
-                    return dict(record)
-            except Exception as exc:
-                logger.warning(f"Neo4j disease context query failed: {exc}")
-        return {}
-
-    # ── Treatment protocol ────────────────────────────────────────────────────
-
-    def get_treatment_protocol(self, disease_name: str) -> List[Dict[str, Any]]:
-        """Return first-line treatment protocols for a disease with drug info."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (dis:Disease {name: $disease})-[r:TREATED_BY]->(trt:Treatment)
-                    OPTIONAL MATCH (trt)-[:REQUIRES_DRUG]->(drug:Drug)
-                    RETURN
-                        trt.name                   AS treatment,
-                        trt.protocol               AS protocol,
-                        trt.evidence_level         AS evidence_level,
-                        trt.withdrawal_milk_days   AS withdrawal_milk_days,
-                        trt.withdrawal_meat_days   AS withdrawal_meat_days,
-                        trt.category               AS category,
-                        r.first_line               AS first_line,
-                        collect(DISTINCT drug.name) AS drugs,
-                        collect(DISTINCT drug.withdrawal_milk_days) AS drug_milk_withdrawals
-                    ORDER BY r.first_line DESC, trt.evidence_level ASC
-                    LIMIT 5
-                    """,
-                    disease=disease_name,
-                )
-                return [dict(r) for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j treatment protocol query failed: {exc}")
-        return []
-
-    # ── Disease progression risk ──────────────────────────────────────────────
-
-    def get_progression_risk(self, disease_name: str) -> List[Dict[str, Any]]:
-        """Return diseases this condition may progress to."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (d1:Disease {name: $disease})-[r:PROGRESSES_TO]->(d2:Disease)
-                    RETURN
-                        d2.name         AS progresses_to,
-                        r.probability   AS probability,
-                        r.time_days     AS time_days,
-                        d2.severity     AS target_severity
-                    ORDER BY r.probability DESC
-                    """,
-                    disease=disease_name,
-                )
-                return [dict(r) for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j progression risk query failed: {exc}")
-        return []
-
-    # ── Zoonotic info ─────────────────────────────────────────────────────────
-
-    def get_zoonotic_info(self, disease_names: List[str]) -> List[Dict[str, Any]]:
-        """Return all diseases in the list that are zoonotic or notifiable."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (d:Disease)
-                    WHERE d.name IN $diseases AND (d.zoonotic = true OR d.notifiable = true)
-                    RETURN d.name AS disease, d.zoonotic AS zoonotic,
-                           d.notifiable AS notifiable, d.description AS description
-                    """,
-                    diseases=disease_names,
-                )
-                return [dict(r) for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j zoonotic query failed: {exc}")
-        return []
-
-    # ── Related diseases ──────────────────────────────────────────────────────
-
-    def get_related_diseases(self, disease_name: str) -> List[str]:
-        """Return diseases that co-occur or share symptoms."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (d1:Disease {name: $disease})-[r:RELATED_TO|HAS_SYMPTOM*1..2]-(d2:Disease)
-                    WHERE d1 <> d2
-                    RETURN DISTINCT d2.name AS related_disease
-                    LIMIT 5
-                    """,
-                    disease=disease_name,
-                )
-                return [r["related_disease"] for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j related diseases query failed: {exc}")
-        return []
-
-    # ── Cow history ───────────────────────────────────────────────────────────
-
-    def get_cow_history(self, cow_id: int) -> List[Dict[str, Any]]:
-        """Return all historical cases for a specific cow."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (c:Cow {cow_id: $cow_id})-[:HAS_CASE]->(cs:Case)-[:DIAGNOSED_AS]->(dis:Disease)
-                    RETURN
-                        cs.case_id    AS case_id,
-                        dis.name      AS disease,
-                        cs.diagnosis  AS diagnosis,
-                        cs.confidence AS confidence,
-                        cs.timestamp  AS timestamp
-                    ORDER BY cs.timestamp DESC
-                    LIMIT 10
-                    """,
-                    cow_id=cow_id,
-                )
-                return [dict(r) for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j cow history query failed: {exc}")
-        return []
-
-    # ── Auto-record diagnosis ─────────────────────────────────────────────────
-
-    def upsert_cow_case(
-        self,
-        cow_id: int,
-        disease: str,
-        confidence: float,
-        case_id: Optional[str] = None,
-        timestamp: Optional[str] = None,
-    ) -> bool:
-        """Record a new diagnosis case for a cow. Auto-called by the pipeline."""
-        import uuid
-        from datetime import datetime
-        case_id   = case_id or f"case_{cow_id}_{disease}_{uuid.uuid4().hex[:6]}"
-        timestamp = timestamp or datetime.now().isoformat()
-        with self._session() as session:
-            if session is None:
-                return False
-            try:
-                session.run(
-                    """
-                    MERGE (c:Cow {cow_id: $cow_id})
-                    MERGE (dis:Disease {name: $disease})
-                    MERGE (cs:Case {case_id: $case_id})
-                    SET cs.diagnosis  = $disease,
-                        cs.confidence = $confidence,
-                        cs.timestamp  = $timestamp
-                    MERGE (c)-[:HAS_CASE]->(cs)
-                    MERGE (cs)-[:DIAGNOSED_AS]->(dis)
-                    MERGE (c)-[:HAS_HISTORY]->(cs)
-                    """,
-                    cow_id=cow_id, disease=disease, case_id=case_id,
-                    confidence=confidence, timestamp=timestamp,
-                )
-                return True
-            except Exception as exc:
-                logger.error(f"Neo4j upsert case failed: {exc}")
-        return False
-
-    # ── Research evidence ─────────────────────────────────────────────────────
-
-    def get_research_evidence(self, disease_name: str, limit: int = 3) -> List[Dict[str, Any]]:
-        """Return recent peer-reviewed research for a disease from the KG."""
-        with self._session() as session:
-            if session is None:
-                return []
-            try:
-                result = session.run(
-                    """
-                    MATCH (r:Research)-[:ABOUT]->(d:Disease {name: $disease})
-                    WHERE r.abstract IS NOT NULL AND r.abstract <> 'No abstract.'
-                    RETURN r.pmid AS pmid, r.title AS title, r.year AS year,
-                           r.journal AS journal, r.abstract AS abstract
-                    ORDER BY r.year DESC
-                    LIMIT $limit
-                    """,
-                    disease=disease_name, limit=limit,
-                )
-                return [dict(r) for r in result]
-            except Exception as exc:
-                logger.warning(f"Neo4j research query failed: {exc}")
-        return []
-
-    # ── Graph statistics ──────────────────────────────────────────────────────
-
-    def get_graph_stats(self) -> Dict[str, int]:
-        """Return node and relationship counts for health check."""
-        counts: Dict[str, int] = {}
-        with self._session() as session:
-            if session is None:
-                return {"connected": 0}
-            try:
-                for label in ["Disease", "Symptom", "Treatment", "Drug", "Cow", "Case", "Research"]:
-                    result = session.run(f"MATCH (n:{label}) RETURN count(n) AS cnt")
-                    rec = result.single()
-                    counts[label] = rec["cnt"] if rec else 0
-                counts["connected"] = 1
-            except Exception as exc:
-                logger.warning(f"Stats query failed: {exc}")
-        return counts
-
-    # ── Legacy compat ─────────────────────────────────────────────────────────
-
-    def build_clinical_relationships_from_documents(self, batch_size: int = 100) -> None:
-        """Legacy method kept for backward compatibility — seeder script now handles this."""
-        logger.info("Skipping legacy relationship builder — use scripts/seed_neo4j.py instead.")
+    @staticmethod
+    def _get_sensor_disease_mappings() -> List[Dict]:
+        return [
+            {"sensor": "body_temperature", "unit": "°C", "disease": "bovine_respiratory_disease", "direction": "above", "threshold": "39.5"},
+            {"sensor": "body_temperature", "unit": "°C", "disease": "mastitis", "direction": "above", "threshold": "39.3"},
+            {"sensor": "milk_conductivity", "unit": "mS/cm", "disease": "mastitis", "direction": "above", "threshold": "7.5"},
+            {"sensor": "rumination_time", "unit": "min/day", "disease": "ketosis", "direction": "below", "threshold": "240"},
+            {"sensor": "milk_yield", "unit": "kg/day", "disease": "mastitis", "direction": "below", "threshold": "15"},
+            {"sensor": "THI", "unit": "index", "disease": "heat_stress", "direction": "above", "threshold": "72"},
+            {"sensor": "activity_level", "unit": "steps/day", "disease": "lameness", "direction": "below", "threshold": "500"},
+        ]

@@ -1,28 +1,348 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Outfit:wght@300;400;500;600;700;800;900&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* =============================================
+   VETERINARY AI DASHBOARD — DESIGN SYSTEM v5.0
+   Inspired by CattleEye, Lely Horizon, Nedap, MyAniml
+   ============================================= */
+
 @layer base {
+  :root {
+    --brand-green:   #2a9d5c;
+    --brand-dark:    #0d3f24;
+    --sage-light:    #e8f0e2;
+    --surface:       #f5f8f5;
+    --card-bg:       rgba(255, 255, 255, 0.92);
+    --border:        rgba(42, 157, 92, 0.15);
+    --transition:    all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+
+  html {
+    scroll-behavior: smooth;
+  }
+
   body {
-    @apply bg-slate-50 text-slate-900 antialiased;
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #f4f8f5;
+    background-image:
+      radial-gradient(ellipse at 10% 0%, rgba(42, 157, 92, 0.06) 0%, transparent 60%),
+      radial-gradient(ellipse at 90% 100%, rgba(42, 157, 92, 0.04) 0%, transparent 60%),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120' opacity='0.025'%3E%3Cellipse cx='30' cy='45' rx='22' ry='16' fill='%232a9d5c'/%3E%3Cellipse cx='30' cy='32' rx='12' ry='14' fill='%232a9d5c'/%3E%3Cellipse cx='80' cy='50' rx='22' ry='16' fill='%232a9d5c'/%3E%3Cellipse cx='80' cy='37' rx='12' ry='14' fill='%232a9d5c'/%3E%3C/svg%3E");
+    color: #1a2e1e;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  * {
+    transition: color 0.2s ease, background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
   }
 }
 
-.glass-card {
-  @apply bg-white/80 backdrop-blur-md border border-slate-200 shadow-sm rounded-xl overflow-hidden;
+/* =============================================
+   COMPONENT LIBRARY
+   ============================================= */
+
+@layer components {
+
+  /* ── Cards ── */
+  .vet-card {
+    @apply bg-white/90 backdrop-blur-sm border rounded-2xl overflow-hidden;
+    border-color: rgba(42, 157, 92, 0.12);
+    box-shadow: 0 2px 16px rgba(13, 63, 36, 0.06), 0 1px 4px rgba(0,0,0,0.04);
+    transition: box-shadow 0.3s ease, transform 0.3s ease;
+  }
+  .vet-card:hover {
+    box-shadow: 0 8px 32px rgba(13, 63, 36, 0.10), 0 2px 8px rgba(0,0,0,0.06);
+  }
+  .vet-card-elevated {
+    @apply vet-card;
+    box-shadow: 0 8px 32px rgba(13, 63, 36, 0.12), 0 2px 8px rgba(0,0,0,0.06);
+  }
+
+  /* Keep old name working */
+  .glass-card {
+    @apply vet-card;
+  }
+
+  /* ── Buttons ── */
+  .btn-primary {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white;
+    background: linear-gradient(135deg, #2a9d5c 0%, #1d7f49 100%);
+    box-shadow: 0 4px 14px rgba(42, 157, 92, 0.30);
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .btn-primary:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(42, 157, 92, 0.45);
+    background: linear-gradient(135deg, #34b96a 0%, #2a9d5c 100%);
+  }
+  .btn-primary:active:not(:disabled) {
+    transform: translateY(0) scale(0.97);
+  }
+  .btn-primary:disabled {
+    @apply bg-none bg-slate-200 text-slate-400 cursor-not-allowed;
+    box-shadow: none;
+  }
+
+  .btn-secondary {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm;
+    background: rgba(42, 157, 92, 0.08);
+    color: #1d7f49;
+    border: 1px solid rgba(42, 157, 92, 0.2);
+    transition: all 0.25s ease;
+  }
+  .btn-secondary:hover:not(:disabled) {
+    background: rgba(42, 157, 92, 0.15);
+    border-color: rgba(42, 157, 92, 0.35);
+    transform: translateY(-1px);
+  }
+
+  .btn-dark {
+    @apply flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-bold text-sm text-white;
+    background: linear-gradient(135deg, #132724 0%, #0d3f24 100%);
+    box-shadow: 0 4px 14px rgba(13, 39, 36, 0.25);
+    transition: all 0.25s ease;
+  }
+  .btn-dark:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 20px rgba(13, 39, 36, 0.35);
+  }
+  .btn-dark:disabled {
+    @apply opacity-40 cursor-not-allowed;
+    transform: none !important;
+  }
+
+  /* ── Status Badges ── */
+  .badge-healthy {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider;
+    background: rgba(16, 185, 129, 0.12);
+    color: #065f46;
+    border: 1px solid rgba(16, 185, 129, 0.25);
+  }
+  .badge-warning {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider;
+    background: rgba(245, 158, 11, 0.12);
+    color: #92400e;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+  }
+  .badge-danger {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider;
+    background: rgba(244, 63, 94, 0.10);
+    color: #9f1239;
+    border: 1px solid rgba(244, 63, 94, 0.25);
+  }
+  .badge-online {
+    @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold;
+    background: rgba(42, 157, 92, 0.10);
+    color: #1d7f49;
+    border: 1px solid rgba(42, 157, 92, 0.20);
+  }
+
+  /* ── Section Headers ── */
+  .section-label {
+    @apply text-[10px] font-bold uppercase tracking-[0.12em] mb-3;
+    color: #5d8f8b;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .section-label::before {
+    content: '';
+    display: block;
+    width: 3px;
+    height: 14px;
+    background: linear-gradient(to bottom, #2a9d5c, #1d7f49);
+    border-radius: 2px;
+  }
+
+  /* ── Input fields ── */
+  .vet-input {
+    @apply w-full px-3 py-2 rounded-xl text-sm font-medium outline-none;
+    background: rgba(244, 248, 245, 0.8);
+    border: 1.5px solid rgba(42, 157, 92, 0.15);
+    color: #1a2e1e;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+  }
+  .vet-input:focus {
+    border-color: rgba(42, 157, 92, 0.5);
+    box-shadow: 0 0 0 3px rgba(42, 157, 92, 0.10);
+  }
+  .vet-input::placeholder {
+    color: #93b6b3;
+  }
+
+  /* ── Cow Cards ── */
+  .cow-card {
+    @apply vet-card p-4;
+    transition: all 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .cow-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 40px rgba(13, 63, 36, 0.14);
+  }
+  .health-border-healthy { border-left: 4px solid #10b981 !important; }
+  .health-border-warning  { border-left: 4px solid #f59e0b !important; }
+  .health-border-critical { border-left: 4px solid #f43f5e !important; }
+
+  /* ── Gate Banners ── */
+  .gate-rejected {
+    @apply rounded-2xl p-5 text-white;
+    background: linear-gradient(135deg, #dc2626 0%, #9f1239 100%);
+    box-shadow: 0 8px 24px rgba(220, 38, 38, 0.30);
+  }
+  .gate-passed {
+    @apply rounded-2xl p-4 text-white;
+    background: linear-gradient(135deg, #2a9d5c 0%, #1d7f49 100%);
+    box-shadow: 0 4px 16px rgba(42, 157, 92, 0.25);
+  }
+
+  /* ── Agent Panel ── */
+  .agent-panel { @apply flex flex-col h-full; }
+  .agent-messages { @apply flex-1 overflow-y-auto p-3 space-y-3; }
+
+  /* ── Crop overlay ── */
+  .crop-overlay {
+    position: absolute;
+    border: 2px dashed #2a9d5c;
+    background: rgba(42, 157, 92, 0.08);
+    cursor: crosshair;
+    pointer-events: none;
+    z-index: 20;
+    border-radius: 4px;
+  }
+
+  /* ── Score Ring ── */
+  .score-ring {
+    width: 76px; height: 76px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 900; font-size: 1.05rem;
+    font-family: 'Outfit', sans-serif;
+  }
+
+  /* ── Scrollbar ── */
+  .vet-scroll::-webkit-scrollbar { width: 5px; }
+  .vet-scroll::-webkit-scrollbar-track { background: transparent; }
+  .vet-scroll::-webkit-scrollbar-thumb { background: rgba(42, 157, 92, 0.20); border-radius: 10px; }
+  .vet-scroll::-webkit-scrollbar-thumb:hover { background: rgba(42, 157, 92, 0.35); }
+
+  /* ── Metric Cards (model outputs) ── */
+  .metric-chip {
+    @apply flex flex-col items-center justify-center gap-0.5 px-3 py-2.5 rounded-xl text-center;
+    background: rgba(244, 248, 245, 0.8);
+    border: 1px solid rgba(42, 157, 92, 0.12);
+    transition: all 0.25s ease;
+    min-width: 80px;
+  }
+  .metric-chip:hover { background: rgba(42, 157, 92, 0.06); }
+
+  /* ── Loading dots ── */
+  .typing-dot {
+    @apply w-2 h-2 rounded-full;
+    background: rgba(42, 157, 92, 0.4);
+    animation: bounce 1.2s ease-in-out infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
 }
 
-.health-border-healthy { @apply border-l-4 border-l-health-emerald; }
-.health-border-warning { @apply border-l-4 border-l-health-amber; }
-.health-border-critical { @apply border-l-4 border-l-health-rose; }
+/* =============================================
+   GLOBAL MICRO-INTERACTIONS
+   ============================================= */
 
-/* Custom scrollbar for markdown */
-.prose-custom::-webkit-scrollbar {
-  width: 6px;
+button {
+  transition: all 0.22s cubic-bezier(0.4, 0, 0.2, 1) !important;
 }
-.prose-custom::-webkit-scrollbar-track {
-  @apply bg-slate-100;
+button:not(:disabled):active {
+  transform: scale(0.95);
 }
-.prose-custom::-webkit-scrollbar-thumb {
-  @apply bg-slate-300 rounded-full hover:bg-slate-400;
+
+/* ── Hero empty state ── */
+.hero-empty {
+  background:
+    radial-gradient(ellipse at 50% 0%, rgba(42, 157, 92, 0.07) 0%, transparent 70%);
+  border: 2px dashed rgba(42, 157, 92, 0.2);
+}
+
+/* ── Cow silhouette animation in hero ── */
+@keyframes moo-float {
+  0%, 100% { transform: translateY(0px) rotate(-1deg); }
+  50%       { transform: translateY(-8px) rotate(1deg); }
+}
+.cow-float { animation: moo-float 4s ease-in-out infinite; }
+
+@keyframes grass-sway {
+  0%, 100% { transform: scaleX(1); }
+  50%       { transform: scaleX(1.05); }
+}
+
+/* ── Glowing status dot ── */
+@keyframes status-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(42, 157, 92, 0.6); }
+  50%       { box-shadow: 0 0 0 6px rgba(42, 157, 92, 0); }
+}
+.status-dot-online {
+  background: #2a9d5c;
+  animation: status-pulse 2s ease-in-out infinite;
+}
+
+/* ── Animated progress bar ── */
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+.progress-shimmer {
+  background: linear-gradient(90deg, #2a9d5c 25%, #4cb87f 50%, #2a9d5c 75%);
+  background-size: 200% auto;
+  animation: shimmer 1.5s linear infinite;
+}
+
+/* ── Page section entrance animations ── */
+.animate-enter {
+  animation: slideUp 0.45s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(24px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-enter-delay-1 { animation-delay: 0.05s; }
+.animate-enter-delay-2 { animation-delay: 0.10s; }
+.animate-enter-delay-3 { animation-delay: 0.15s; }
+
+/* ── Chat bubbles ── */
+.chat-user-bubble {
+  background: linear-gradient(135deg, #132724 0%, #0d3f24 100%);
+  color: white;
+  border-radius: 18px 18px 4px 18px;
+}
+.chat-ai-bubble {
+  background: white;
+  color: #1a2e1e;
+  border: 1px solid rgba(42, 157, 92, 0.12);
+  border-radius: 18px 18px 18px 4px;
+  box-shadow: 0 2px 8px rgba(13, 63, 36, 0.06);
+}
+
+/* ── Chip / Tag ── */
+.tag {
+  @apply inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold;
+}
+
+/* ── Full-page loading overlay ── */
+.pipeline-loader {
+  background: linear-gradient(160deg, #f4f8f5 0%, #e8f0e2 100%);
+}
+
+/* ── Report prose ── */
+.report-prose p { @apply mb-2 leading-relaxed; }
+.report-prose strong { @apply font-black text-brand-800; }
+
+/* ── Crop result card ── */
+.crop-result-card {
+  background: rgba(42, 157, 92, 0.04);
+  border: 1px solid rgba(42, 157, 92, 0.15);
+  @apply rounded-xl p-3 text-xs space-y-2;
 }

@@ -1,132 +1,150 @@
 """
-app/dependencies.py
-===================
-FastAPI dependency injection providers.
-All heavy objects (models, services) are created once and reused across requests.
+app/dependencies.py — FastAPI dependency injection providers.
+All heavy objects (models, services) are created once and reused.
+Now wired to the REAL MMCOWS models instead of fake checkpoints.
 """
-
 from __future__ import annotations
-
 from functools import lru_cache
-
 from app.config import get_settings
-from models.identity.yolo_model import CowIdentityEngine
-from models.identity.faiss_index import IdentityEmbeddingBank
-from models.disease.maxvit_model import MaxViTDiseaseClassifier
-from models.risk.transformer_model import HealthRiskTransformer
-from services.rag_service import VeterinaryRAGService
-from services.llm_service import GroqLLMService
-from services.neo4j_service import Neo4jService
-from services.safety_engine import ClinicalSafetyEngine
-from services.vision_service import GroqVisionService
-from pipelines.inference_pipeline import VeterinaryInferencePipeline
 
-
-# ── Singleton factories ─────────────────────────────────────────────────────
-
+# ── MMCOWS Model Factories ──────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def get_identity_engine() -> CowIdentityEngine:
-    settings = get_settings()
-    return CowIdentityEngine(
-        model_path=settings.identity_model_path,
-        model_url=settings.identity_model_url,
-        device=None,  # auto-detect
+def get_cow_identifier():
+    from models.mmcows.cow_identifier import CowIdentifier
+    s = get_settings()
+    return CowIdentifier(
+        checkpoint_path=s.identification_model_path,
+        mmcows_src_path=s.mmcows_src_path,
+        confidence_threshold=s.identity_confidence_threshold,
     )
 
-
 @lru_cache(maxsize=1)
-def get_identity_bank() -> IdentityEmbeddingBank:
-    settings = get_settings()
-    return IdentityEmbeddingBank(
-        embedding_dim=settings.identity_embedding_dim,
-        persistence_path=settings.identity_bank_path,
-        similarity_threshold=settings.identity_similarity_threshold,
-        min_embeddings=settings.min_embeddings_per_cow,
-        max_embeddings=settings.max_embeddings_per_cow,
+def get_milk_predictor():
+    from models.mmcows.milk_predictor import MilkProductivityPredictor
+    s = get_settings()
+    return MilkProductivityPredictor(
+        checkpoint_path=s.milk_prediction_model_path,
+        mmcows_src_path=s.mmcows_src_path,
     )
 
-
 @lru_cache(maxsize=1)
-def get_disease_model() -> MaxViTDiseaseClassifier:
-    settings = get_settings()
-    return MaxViTDiseaseClassifier(
-        checkpoint_path=settings.disease_model_path,
-        model_url=settings.disease_model_url,
+def get_heat_stress_analyzer():
+    from models.mmcows.heat_stress_analyzer import HeatStressAnalyzer
+    s = get_settings()
+    return HeatStressAnalyzer(
+        checkpoint_path=s.behavior_model_path,
+        mmcows_src_path=s.mmcows_src_path,
     )
 
-
 @lru_cache(maxsize=1)
-def get_risk_model() -> HealthRiskTransformer:
-    settings = get_settings()
-    return HealthRiskTransformer(
-        checkpoint_path=settings.early_warning_model_path,
-        model_url=settings.early_warning_model_url,
+def get_health_scorer():
+    from models.mmcows.health_scorer import HealthScorer
+    s = get_settings()
+    return HealthScorer(
+        mmcows_base_path=s.mmcows_base_path,
     )
 
+@lru_cache(maxsize=1)
+def get_data_pipeline():
+    from models.mmcows.data_loader import MMCowsDataPipeline
+    s = get_settings()
+    return MMCowsDataPipeline(mmcows_base_path=s.mmcows_base_path)
+
+# ── Service Factories ────────────────────────────────────────────────────────
 
 @lru_cache(maxsize=1)
-def get_rag_service() -> VeterinaryRAGService:
-    settings = get_settings()
+def get_rag_service():
+    from services.rag_service import VeterinaryRAGService
+    s = get_settings()
     return VeterinaryRAGService(
-        persist_dir=settings.chroma_persist_dir,
-        embedding_model=settings.rag_embedding_model,
-        chunk_size=settings.rag_chunk_size,
-        chunk_overlap=settings.rag_chunk_overlap,
-        top_k=settings.rag_top_k,
-        kb_cache_path=settings.kb_cache_path,
-        hf_token=settings.hf_token,
+        persist_dir=s.chroma_persist_dir, embedding_model=s.rag_embedding_model,
+        chunk_size=s.rag_chunk_size, chunk_overlap=s.rag_chunk_overlap,
+        top_k=s.rag_top_k, kb_cache_path=s.kb_cache_path, hf_token=s.hf_token,
     )
 
+@lru_cache(maxsize=1)
+def get_llm_service():
+    from services.llm_service import GroqLLMService
+    s = get_settings()
+    return GroqLLMService(api_key=s.groq_api_key, model=s.groq_model,
+                          temperature=s.groq_temperature, max_tokens=s.groq_max_tokens)
 
 @lru_cache(maxsize=1)
-def get_llm_service() -> GroqLLMService:
-    settings = get_settings()
-    return GroqLLMService(
-        api_key=settings.groq_api_key,
-        model=settings.groq_model,
-        temperature=settings.groq_temperature,
-        max_tokens=settings.groq_max_tokens,
-    )
-
+def get_neo4j_service():
+    from services.neo4j_service import Neo4jService
+    s = get_settings()
+    return Neo4jService(uri=s.neo4j_uri, user=s.neo4j_user,
+                        password=s.neo4j_password, database=s.neo4j_database)
 
 @lru_cache(maxsize=1)
-def get_neo4j_service() -> Neo4jService:
-    settings = get_settings()
-    return Neo4jService(
-        uri=settings.neo4j_uri,
-        user=settings.neo4j_user,
-        password=settings.neo4j_password,
-        database=settings.neo4j_database,
-    )
-
+def get_disease_service():
+    from models.mmcows.disease_classifier import MaxVitDiseaseService
+    s = get_settings()
+    return MaxVitDiseaseService(model_path=r"C:\Users\Dell\Downloads\best_model.pth")
 
 @lru_cache(maxsize=1)
-def get_vision_service() -> GroqVisionService:
-    settings = get_settings()
-    return GroqVisionService(api_key=settings.groq_api_key)
-
-
-@lru_cache(maxsize=1)
-def get_safety_engine() -> ClinicalSafetyEngine:
-    settings = get_settings()
+def get_safety_engine():
+    from services.safety_engine import ClinicalSafetyEngine
+    s = get_settings()
     return ClinicalSafetyEngine(
-        min_confidence=settings.min_confidence_for_auto_diagnosis,
-        require_weight_for_dosing=settings.require_weight_for_dosing,
-        block_uncertain=settings.block_uncertain_recommendations,
+        min_confidence=s.min_confidence_for_auto_diagnosis,
+        require_weight_for_dosing=s.require_weight_for_dosing,
+        block_uncertain=s.block_uncertain_recommendations,
     )
-
 
 @lru_cache(maxsize=1)
-def get_pipeline() -> VeterinaryInferencePipeline:
-    return VeterinaryInferencePipeline(
-        identity_engine=get_identity_engine(),
-        identity_bank=get_identity_bank(),
-        disease_model=get_disease_model(),
-        risk_model=get_risk_model(),
-        rag_service=get_rag_service(),
-        llm_service=get_llm_service(),
-        neo4j_service=get_neo4j_service(),
-        safety_engine=get_safety_engine(),
-        vision_service=get_vision_service(),
+def get_bovine_iq_agent():
+    from services.bovine_iq_service import BovineIQAgent
+    s = get_settings()
+    
+    # Try to inject dependencies if available
+    data_pipeline = rag = neo4j = pipeline = None
+    try: data_pipeline = get_data_pipeline()
+    except Exception: pass
+    try: rag = get_rag_service()
+    except Exception: pass
+    try: neo4j = get_neo4j_service()
+    except Exception: pass
+    try: pipeline = get_pipeline()
+    except Exception: pass
+    
+    return BovineIQAgent(
+        api_key=s.groq_api_key,
+        data_pipeline=data_pipeline,
+        neo4j_service=neo4j,
+        rag_service=rag,
+        inference_pipeline=pipeline,
+        model_name=s.groq_model
     )
+
+@lru_cache(maxsize=1)
+def get_pipeline():
+    from pipelines.inference_pipeline import VeterinaryInferencePipeline
+
+    # Optional services — degrade gracefully
+    disease_service = rag = llm = neo4j = safety = None
+    try: disease_service = get_disease_service()
+    except Exception: pass
+    try: rag = get_rag_service()
+    except Exception: pass
+    try: llm = get_llm_service()
+    except Exception: pass
+    try: neo4j = get_neo4j_service()
+    except Exception: pass
+    try: safety = get_safety_engine()
+    except Exception: pass
+
+    return VeterinaryInferencePipeline(
+        cow_identifier=get_cow_identifier(),
+        milk_predictor=get_milk_predictor(),
+        heat_stress_analyzer=get_heat_stress_analyzer(),
+        health_scorer=get_health_scorer(),
+        data_pipeline=get_data_pipeline(),
+        vision_service=disease_service,  # We replace the dummy vision with the real PyTorch model
+        rag_service=rag,
+        llm_service=llm,
+        neo4j_service=neo4j,
+        safety_engine=safety,
+    )
+
