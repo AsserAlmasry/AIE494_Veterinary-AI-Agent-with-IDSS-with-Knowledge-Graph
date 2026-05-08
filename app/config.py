@@ -10,7 +10,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=[".env", os.path.join(os.getcwd(), ".env")],
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
 
     # ── LLM (Groq) ──────────────────────────────────────────────────────────
     groq_api_key: str
@@ -25,7 +30,7 @@ class Settings(BaseSettings):
     neo4j_uri: str = "neo4j+s://43b30b0c.databases.neo4j.io"
     neo4j_user: str = "43b30b0c"
     neo4j_password: str
-    neo4j_database: str = "43b30b0c"
+    neo4j_database: str = "neo4j"
 
     # ── MMCOWS Model Paths ──────────────────────────────────────────────────
     mmcows_base_path: str = "."
@@ -35,7 +40,11 @@ class Settings(BaseSettings):
     # Individual model checkpoint names
     identification_model_name: str = "identification_model.pt"
     milk_prediction_model_name: str = "milk_prediction_model.pth"
-    behavior_model_name: str = "behavior_model.pth"
+    behavior_model_name: str = "heat_stress_model.pt"
+    heat_stress_scaler_name: str = "feature_scaler.pkl"
+    health_model_name: str = "health_model.pt"
+    health_scaler_name: str = "health_scaler.pkl"
+    disease_model_name: str = "disease_model.pth"
     anomaly_model_name: str = "anomaly_autoencoder.pth"
     fusion_model_name: str = "fusion_model.pth"
 
@@ -53,7 +62,7 @@ class Settings(BaseSettings):
     identity_confidence_threshold: float = 0.65
 
     # ── RAG ──────────────────────────────────────────────────────────────────
-    rag_embedding_model: str = "sentence-transformers/all-mpnet-base-v2"
+    rag_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     rag_chunk_size: int = 650
     rag_chunk_overlap: int = 80
     rag_top_k: int = 5
@@ -80,23 +89,39 @@ class Settings(BaseSettings):
     # ── Derived helpers ──────────────────────────────────────────────────────
     @property
     def identification_model_path(self) -> str:
-        return os.path.join(self.mmcows_saved_models_dir, self.identification_model_name)
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 1-20260426T224107Z-3-001/Task 1/Idintification model.pt")
 
     @property
     def milk_prediction_model_path(self) -> str:
-        return os.path.join(self.mmcows_saved_models_dir, self.milk_prediction_model_name)
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 4-20260426T224204Z-3-001/Task 4/ensemble_TabTransformer_fold3.pth")
 
     @property
     def behavior_model_path(self) -> str:
-        return os.path.join(self.mmcows_saved_models_dir, self.behavior_model_name)
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 2-20260426T224124Z-3-001/Task 2/best_heat_stress_model.pt")
 
     @property
     def anomaly_model_path(self) -> str:
         return os.path.join(self.mmcows_saved_models_dir, self.anomaly_model_name)
 
     @property
+    def heat_stress_scaler_path(self) -> str:
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 2-20260426T224124Z-3-001/Task 2/feature_scaler.pkl")
+
+    @property
     def fusion_model_path(self) -> str:
         return os.path.join(self.mmcows_saved_models_dir, self.fusion_model_name)
+
+    @property
+    def health_model_path(self) -> str:
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 5-20260426T224142Z-3-001/Task 5/best_health_model.pt")
+
+    @property
+    def health_scaler_path(self) -> str:
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 5-20260426T224142Z-3-001/Task 5/health_scaler.pkl")
+
+    @property
+    def disease_model_path(self) -> str:
+        return os.path.join(self.mmcows_base_path, "graduation project models/Task 3-Disease Classification/best_model.pth")
 
 
 @lru_cache(maxsize=1)

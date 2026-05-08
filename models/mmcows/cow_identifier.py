@@ -12,7 +12,7 @@ Provides:
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -41,17 +41,17 @@ class CowIdentifier:
         checkpoint_path: str,
         mmcows_src_path: Optional[str] = None,
         device: Optional[str] = None,
-        confidence_threshold: float = 0.30,
+        confidence_threshold: float = 0.85,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.confidence_threshold = 0.90
+        self.confidence_threshold = confidence_threshold
         self._model = None
         self._available = False
         
         self._load_model(checkpoint_path)
         logger.info(
             f"CowIdentifier ready | device={self.device} | "
-            f"model_loaded={self._available} | threshold=0.90"
+            f"model_loaded={self._available} | threshold={self.confidence_threshold}"
         )
 
     # ── Model loading ─────────────────────────────────────────────────────────
@@ -106,8 +106,8 @@ class CowIdentifier:
                     # Classes 0-15 map to Cow IDs 1-16
                     cow_id = cls_idx + 1
                     
-                    # STRICT CHECK: Only allow if confidence >= 0.90
-                    if conf >= 0.90:
+                    # STRICT CHECK: Only allow if confidence >= 0.85
+                    if conf >= 0.85:
                         detections.append({
                             "cow_id": cow_id,
                             "confidence": round(conf, 4),

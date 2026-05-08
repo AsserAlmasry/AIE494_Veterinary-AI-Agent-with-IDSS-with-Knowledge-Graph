@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   Upload, Activity, ShieldAlert, User, Thermometer, FileText,
   CheckCircle2, Loader2, AlertTriangle, Weight, FlaskConical,
-  Stethoscope, MessageSquare, Send, X, Crop, Eye, BarChart3,
-  Droplets, Sun, Heart, Zap, ChevronRight, Calendar
+  Stethoscope, MessageSquare, Send, Recycle, Crop, Eye, BarChart3,
+  Droplets, Sun, Heart, Zap, ChevronRight, Calendar, X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -21,7 +21,7 @@ const LOADING_STEPS = [
   "Computing health score (Fusion + Anomaly)...",
   "Querying Neo4j Knowledge Graph...",
   "Retrieving PubMed evidence...",
-  "Synthesizing IDSS report (Llama 3.3 70B)..."
+  "Synthesizing IDSS report (Veterinary AI Agent)..."
 ];
 
 export default function App() {
@@ -58,7 +58,7 @@ export default function App() {
   const [chatImage, setChatImage] = useState(null);
   const [chatPreview, setChatPreview] = useState(null);
   const [chatMessages, setChatMessages] = useState([
-    { role: 'assistant', content: "Hello! I'm your **Veterinary AI Agent Assistant**. Upload a cow image here or use the main uploader to begin our clinical analysis. 🐄✨" }
+    { role: 'assistant', content: "Hello! I'm your **Universal Veterinary AI Assistant**. 🐄✨ I'm here to help you manage your monitored cattle population with state-of-the-art diagnostics and real-time clinical support. 🌡️🧪\n\nHow can I help you today? You can upload an image, paste one from your clipboard, or use the quick actions below! 🚀💊" }
   ]);
   const [isTyping, setIsTyping] = useState(false);
   const chatEndRef = useRef(null);
@@ -172,11 +172,18 @@ export default function App() {
     setIsTyping(true);
     
     try {
-      const data = await agentChat(textToSend || "Analyze this image.", result?.cow_id, result?.stages?.report?.report || "", finalImage);
+      // Use agentChat for full clinical diagnostics and tool-calling
+      const data = await agentChat(textToSend || "Analyze this image.", selectedCowId, null, finalImage);
+      
       const formattedAnswer = data.answer || 'No response available.';
-      setChatMessages(prev => [...prev, { role: 'assistant', content: formattedAnswer }]);
+      const agentImage = data.image_b64;
+      setChatMessages(prev => [...prev, { 
+        role: 'assistant', 
+        content: formattedAnswer,
+        image_b64: agentImage
+      }]);
     } catch (err) {
-      setChatMessages(prev => [...prev, { role: 'assistant', content: "I'm having trouble connecting to the Veterinary Agent. Please try again." }]);
+      setChatMessages(prev => [...prev, { role: 'assistant', content: "I'm having trouble connecting to BovineIQ. Please try again." }]);
     }
     finally { setIsTyping(false); }
   };
@@ -235,7 +242,7 @@ export default function App() {
             </div>
             <div>
               <h1 className="text-base font-black tracking-tight" style={{fontFamily:'Outfit,sans-serif',color:'#0d3f24'}}>Veterinary AI <span className="font-light">Intelligence</span></h1>
-              <p className="text-[10px] font-semibold uppercase tracking-[0.15em]" style={{color:'#5d8f8b'}}>MMCOWS · 16 Cows · 5 Models · Llama 4</p>
+              <p className="text-[10px] font-semibold uppercase tracking-[0.15em]" style={{color:'#5d8f8b'}}>MMCOWS · 16 Cows · 5 Models · Llama 3.3</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
@@ -422,7 +429,7 @@ export default function App() {
                   <p className="text-sm mt-1" style={{color:'#5d8f8b'}}>5 AI models · 16 known cows · 14-day MMCOWS dataset</p>
                 </div>
                 <div className="flex gap-3 text-xs">
-                  {['Re-ID','Milk Yield','Heat Stress','Health Score','Anomaly'].map(m => (
+                  {['Re-ID','Milk Yield (L)','Heat Stress','Health Score','Anomaly'].map(m => (
                     <span key={m} className="px-2.5 py-1 rounded-full font-semibold" style={{background:'rgba(42,157,92,0.10)',color:'#1d7f49',border:'1px solid rgba(42,157,92,0.2)'}}>{m}</span>
                   ))}
                 </div>
@@ -534,13 +541,13 @@ export default function App() {
                           <Droplets className="w-3.5 h-3.5 mb-0.5" style={{color:'#0ea5e9'}} />
                           <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Milk</span>
                           <span className={cn('text-sm font-black text-sky-600',myVal?.includes?.('Provide')?'text-[9px] text-slate-400 leading-tight':'')}>
-                            {myVal?`${myVal}${typeof myVal==='number'?'kg':''}`:'N/A'}
+                            {myVal?`${myVal}${typeof myVal==='number'?'L':''}`:'N/A'}
                           </span>
                         </div>
                         <div className="metric-chip">
                           <Sun className="w-3.5 h-3.5 mb-0.5" style={{color:'#f59e0b'}} />
                           <span className="text-[9px] font-bold uppercase tracking-wider text-slate-400">Heat</span>
-                          <span className={cn('text-sm font-black capitalize',heatLevel?.includes?.('Provide')?'text-[9px] text-slate-400 leading-tight normal-case':heatLevel==='no_stress'?'text-emerald-600':heatLevel==='severe'?'text-rose-600':'text-amber-600')}>
+                          <span className={cn('text-sm font-black capitalize',heatLevel?.includes?.('Provide')?'text-[9px] text-slate-400 leading-tight normal-case':(heatLevel==='no_stress' || heatLevel==='normal')?'text-emerald-600':heatLevel==='severe'?'text-rose-600':'text-amber-600')}>
                             {heatLevel.replace('_',' ')}
                           </span>
                         </div>
@@ -595,13 +602,22 @@ export default function App() {
                   <MessageSquare className="w-4 h-4 text-white" />
                 </div>
                 <div>
-                  <h4 className="font-black text-sm" style={{fontFamily:'Outfit,sans-serif'}}>Veterinary AI Assistant</h4>
-                  <p className="text-[10px] text-emerald-200 font-medium">
-                    Clinical &amp; Diagnostic Agent
+                  <h4 className="font-black text-sm" style={{fontFamily:'Outfit,sans-serif'}}>Veterinary AI Agent</h4>
+                  <p className="text-[10px] text-emerald-100 font-medium opacity-90">
+                    Expert Clinical Support System 🌡️
                     {isRejected && <span className="text-rose-300 ml-1">• BLOCKED</span>}
                   </p>
                 </div>
-                <span className="ml-auto text-lg">🐄</span>
+                <div className="ml-auto flex items-center gap-2">
+                  <button 
+                    onClick={() => setChatMessages([{ role: 'assistant', content: "Chat recycled. I'm ready for new diagnostics! 🐄✨♻️" }])}
+                    className="p-1.5 hover:bg-white/20 rounded-lg transition-colors"
+                    title="Clear Chat"
+                  >
+                    <Recycle className="w-3.5 h-3.5" />
+                  </button>
+                  <span className="text-lg">🩺</span>
+                </div>
               </div>
             </div>
 
@@ -627,7 +643,7 @@ export default function App() {
                       if (formatted.includes('[SHOW_IMAGE:')) {
                         const match = formatted.match(/\[SHOW_IMAGE:\s*(.*?)\]/);
                         if (match) {
-                          const src = match[1].startsWith('http') ? match[1] : `http://localhost:8001${match[1]}`;
+                          const src = match[1].startsWith('http') ? match[1] : `http://localhost:8000${match[1]}`;
                           return <img key={i} src={src} alt="Agent Output" className="mt-2 rounded-lg max-w-full" />;
                         }
                       }
@@ -653,6 +669,19 @@ export default function App() {
                       }
                       return <p key={i} className="mb-1" dangerouslySetInnerHTML={{ __html: formatted }} />;
                     })}
+                    
+                    {msg.image_b64 && (
+                      <div className="mt-3 relative rounded-xl overflow-hidden border-2 border-emerald-500/30 shadow-lg group">
+                        <img 
+                          src={msg.image_b64.startsWith('data:') ? msg.image_b64 : `data:image/jpeg;base64,${msg.image_b64}`} 
+                          alt="Agent Clinical Analysis" 
+                          className="w-full h-auto object-cover"
+                        />
+                        <div className="absolute bottom-0 left-0 right-0 bg-emerald-900/80 text-white text-[10px] py-1 px-3 font-bold backdrop-blur-sm transform translate-y-full group-hover:translate-y-0 transition-transform">
+                          CLINICAL ANNOTATION: COW #{selectedCowId || '?' } IDENTIFIED
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </motion.div>
               ))}
@@ -674,8 +703,26 @@ export default function App() {
                 <p className="text-[10px] italic" style={{color:'#5d8f8b'}}>Image attached for clinical vision analysis...</p>
               </div>
             )}
+              {/* Quick Actions */}
+              {!isRejected && (
+                <div className="px-3 py-2 flex gap-2 overflow-x-auto vet-scroll no-scrollbar bg-white">
+                  {[
+                    { label: "🔍 Quick Diagnostic Assessment 🩺🔬", query: "Perform a quick clinical diagnostic assessment of the cattle community." },
+                    { label: "🌡️ Health Alert 🚨", query: "Are there any urgent health alerts or critical cases among the cows?" },
+                    { label: "🥛 Milk Production 📊", query: "Show me the latest milk production analysis and predictions for the population." },
+                    { label: "💊 Treatment Plan 🩹", query: "What are the recommended treatment plans for the identified clinical issues?" }
+                  ].map((act, idx) => (
+                    <button key={idx} 
+                      onClick={() => handleChatSubmit(null, act.query)}
+                      className="whitespace-nowrap px-3 py-1.5 rounded-full text-[10px] font-bold border border-emerald-100 bg-emerald-50/50 text-emerald-700 hover:bg-emerald-100 transition-colors">
+                      {act.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
             <form onSubmit={handleChatSubmit} className="p-3 flex items-center gap-2 border-t" style={{background:'white',borderColor:'rgba(42,157,92,0.12)'}}>
-              <label className="cursor-pointer transition-colors" style={{color:'#5d8f8b'}}>
+              <label className="cursor-pointer transition-colors hover:text-emerald-600" style={{color:'#5d8f8b'}}>
                 <input type="file" className="hidden" accept="image/*" onChange={(e)=>{
                   const f=e.target.files[0];
                   if(f){setChatImage(f);setChatPreview(URL.createObjectURL(f));}
@@ -684,8 +731,16 @@ export default function App() {
               </label>
               <input value={chatInput} onChange={(e)=>setChatInput(e.target.value)}
                 disabled={isRejected}
-                placeholder={isRejected ? 'Chat disabled...' : 'Ask for diagnostics...'}
-                className="flex-1 px-3 py-2 rounded-xl text-xs outline-none" style={{background:'rgba(244,248,245,0.8)',border:'1.5px solid rgba(42,157,92,0.15)'}} />
+                placeholder={isRejected ? 'Chat disabled 🚫' : 'Ask me anything about your herd! 🐄✨🌡️'}
+                onPaste={(e) => {
+                  const item = e.clipboardData.items[0];
+                  if (item?.type.includes('image')) {
+                    const file = item.getAsFile();
+                    setChatImage(file);
+                    setChatPreview(URL.createObjectURL(file));
+                  }
+                }}
+                className="flex-1 px-3 py-2 rounded-xl text-xs outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all" style={{background:'rgba(244,248,245,0.8)',border:'1.5px solid rgba(42,157,92,0.15)'}} />
               <button type="submit" disabled={isTyping||(!chatInput.trim()&&!chatImage)}
                 className="p-2 rounded-xl text-white transition-all disabled:opacity-40"
                 style={{background:'linear-gradient(135deg,#2a9d5c,#1d7f49)'}}>

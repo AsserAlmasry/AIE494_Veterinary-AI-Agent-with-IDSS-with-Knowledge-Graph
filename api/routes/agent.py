@@ -35,6 +35,7 @@ class ChatResponse(BaseModel):
     answer: str
     evidence_count: int = 0
     cow_id: Optional[int] = None
+    image_b64: Optional[str] = None
 
 
 @router.post("/agent/chat", response_model=ChatResponse, summary="Chat with BovineIQ Veterinary Agent")
@@ -85,14 +86,37 @@ async def agent_chat(
 
     # Route through BovineIQ agent
     try:
-        from app.dependencies import get_bovine_iq_agent
         agent = get_bovine_iq_agent()
         result = await agent.query(enriched_message, [], image_b64=req.image_b64)
+        
+        image_payload = None
         if isinstance(result, dict):
             answer = result.get("content", result.get("answer", str(result)))
+            image_payload = result.get("image_b64")
         else:
             answer = str(result)
-        return ChatResponse(answer=answer, evidence_count=len(docs), cow_id=req.cow_id)
+            
+        # EXTRACTION: Extract image_b64 if the agent tool put it in the text marker
+        if "|image_b64|:" in answer:
+            parts = answer.split("|image_b64|:")
+            answer = parts[0].strip()
+            if len(parts) > 1 and not image_payload:
+                image_payload = parts[1].strip()
+                if not image_payload: image_payload = None
+
+        # FALLBACK: If still no image but we have a cow_id, try pipeline cache
+        if not image_payload and req.cow_id:
+            pipeline = get_pipeline()
+            latest = pipeline.get_latest_status(req.cow_id)
+            if latest and latest.get("image_b64"):
+                image_payload = latest.get("image_b64")
+
+        return ChatResponse(
+            answer=answer, 
+            evidence_count=len(docs), 
+            cow_id=req.cow_id,
+            image_b64=image_payload
+        )
     except Exception as e:
         logger.warning(f"BovineIQ agent failed, using LLM fallback: {e}")
 
@@ -101,7 +125,7 @@ async def agent_chat(
         from app.dependencies import get_llm_service
         llm_service = get_llm_service()
         context = "\n\n".join(context_parts) if context_parts else None
-        answer = llm_service.answer_clinical_question(req.message, context)
+        answer = await llm_service.answer_clinical_question(req.message, context)
         return ChatResponse(answer=answer, evidence_count=len(docs), cow_id=req.cow_id)
     except Exception as e:
         logger.error(f"Agent chat complete failure: {e}")

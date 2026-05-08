@@ -69,17 +69,18 @@ class VeterinaryRAGService:
 
     NCBI_SEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
     NCBI_FETCH_URL  = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-    COLLECTION_NAME = "vet_knowledge_base_v2"  # v2 = new embedding model
+    COLLECTION_NAME = "vet_knowledge_base_v4"  # High-accuracy L6 collection
 
     def __init__(
         self,
         persist_dir: str = "./data/chroma_vet_rag",
-        embedding_model: str = "sentence-transformers/all-mpnet-base-v2",
+        embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2",
         chunk_size: int = 650,
         chunk_overlap: int = 80,
         top_k: int = 5,
         kb_cache_path: str = "./data/pubmed_kb.json",
         hf_token: Optional[str] = None,
+        neo4j_service: Any = None,
     ) -> None:
         self.persist_dir          = persist_dir
         self.embedding_model_name = embedding_model
@@ -88,10 +89,12 @@ class VeterinaryRAGService:
         self.top_k                = top_k
         self.kb_cache_path        = kb_cache_path
         self.hf_token             = hf_token
+        self.neo4j_service        = neo4j_service
 
         self._embedder      = None
         self._chroma_client = None
         self._collection    = None
+        self._is_indexing   = False
 
         self._initialize()
 
@@ -101,25 +104,34 @@ class VeterinaryRAGService:
         self._load_embedder()
         self._load_chroma()
         
-        # Immediate check — do not block startup for minutes
         count = self._collection.count()
         if count == 0:
-            logger.warning("RAG vector store empty. Background indexing suggested.")
-            # In production, we'd trigger a background task. 
-            # For now, let's just make sure we don't hang.
-            try:
-                documents = self._load_or_fetch_kb()
-                if documents:
-                    self._index_documents(documents)
-            except Exception as exc:
-                logger.error(f"Background RAG initialization failed: {exc}")
+            logger.warning("RAG vector store empty. Starting background indexing … 🐄")
+            import threading
+            thread = threading.Thread(target=self._background_indexing_job, daemon=True)
+            thread.start()
         else:
             logger.info(f"RAG READY | {count} chunks | model={self.embedding_model_name}")
+
+    def _background_indexing_job(self) -> None:
+        """Runs indexing in a separate thread to avoid blocking the main event loop."""
+        try:
+            self._is_indexing = True
+            documents = self._load_or_fetch_kb()
+            if documents:
+                self._index_documents(documents)
+            logger.info("Background RAG indexing complete. 🚀")
+        except Exception as exc:
+            logger.error(f"Background RAG initialization failed: {exc}")
+        finally:
+            self._is_indexing = False
 
     def _load_embedder(self) -> None:
         try:
             from sentence_transformers import SentenceTransformer
             token_kwargs = {"token": self.hf_token} if self.hf_token else {}
+            # Add small delay to ensure network stack is ready in background thread
+            time.sleep(2)
             logger.info(f"Loading embedding model: {self.embedding_model_name} …")
             self._embedder = SentenceTransformer(
                 self.embedding_model_name, **token_kwargs
@@ -329,7 +341,7 @@ class VeterinaryRAGService:
             metas = results.get("metadatas", [[]])[0]
             dists = results.get("distances", [[]])[0]
 
-            return [
+            results_list = [
                 {
                     "text":       doc,
                     "snippet":    doc[:300] + "…" if len(doc) > 300 else doc,
@@ -342,8 +354,91 @@ class VeterinaryRAGService:
                 }
                 for doc, meta, dist in zip(docs, metas, dists)
             ]
+
+            # ── Graph-Augmented Retrieval ──
+            if self.neo4j_service:
+                graph_results = self._retrieve_from_graph(query)
+                if graph_results:
+                    # Prepend graph results as they are usually high-confidence clinical data
+                    results_list = graph_results + results_list
+            
+            return results_list[:k+2] # Return a bit more if we have graph data
         except Exception as exc:
             logger.error(f"RAG retrieval error: {exc}", exc_info=True)
+            return []
+
+    def _retrieve_from_graph(self, query: str) -> List[Dict[str, Any]]:
+        """Extract clinical context from Neo4j based on query keywords."""
+        try:
+            graph_docs = []
+            query_lower = query.lower()
+            
+            # Try to find disease keywords in query
+            diseases_to_check = ["mastitis", "lameness", "ketosis", "heat_stress", "milk_fever", "respiratory", "lsd", "fmd"]
+            found_diseases = [d for d in diseases_to_check if d in query_lower.replace(" ", "_")]
+            
+            if not found_diseases:
+                return []
+
+            for disease in found_diseases:
+                # 1. Get treatment protocols
+                protocols = self.neo4j_service.get_treatment_protocol(disease)
+                if protocols:
+                    text = f"Clinical Protocol for {disease.upper()}:\n"
+                    for p in protocols:
+                        text += f"- Treatment: {p['treatment']} | Drug: {p.get('drug', 'N/A')} | Dose: {p.get('dosage', 'N/A')}\n"
+                        text += f"  Protocol: {p.get('protocol', 'N/A')}\n"
+                        if p.get('withdrawal_milk_days'):
+                            text += f"  Withdrawal (Milk): {p['withdrawal_milk_days']} days\n"
+                    
+                    graph_docs.append({
+                        "text": text,
+                        "snippet": text[:300] + "...",
+                        "title": f"Neo4j Clinical Protocol: {disease}",
+                        "source": "Knowledge Graph",
+                        "disease": disease,
+                        "similarity": 1.0, # High priority
+                        "is_clinical_protocol": True
+                    })
+                
+                # 2. Get related diseases / differentials
+                differentials = self.neo4j_service.get_related_diseases(disease)
+                if differentials:
+                    diff_text = f"Differential Diagnoses for {disease.upper()}:\n"
+                    for diff in differentials:
+                        diff_text += f"- {diff['disease']} (Category: {diff.get('category')}, Severity: {diff.get('severity')})\n"
+                    
+                    graph_docs.append({
+                        "text": diff_text,
+                        "snippet": diff_text[:300] + "...",
+                        "title": f"Neo4j Differentials: {disease}",
+                        "source": "Knowledge Graph",
+                        "disease": disease,
+                        "similarity": 0.95,
+                    })
+                    
+                # 3. Get research articles
+                research_articles = self.neo4j_service.get_disease_research(disease)
+                if research_articles:
+                    for article in research_articles:
+                        art_text = f"Title: {article.get('title', 'Unknown')}\n"
+                        art_text += f"Author/Journal: {article.get('journal', 'Unknown')}\n"
+                        art_text += f"Year: {article.get('year', 'Unknown')}\n"
+                        art_text += f"Abstract: {article.get('abstract', '')}\n"
+                        
+                        graph_docs.append({
+                            "text": art_text,
+                            "snippet": art_text[:300] + "...",
+                            "title": article.get('title', 'Unknown'),
+                            "source": "Neo4j Knowledge Base",
+                            "disease": disease,
+                            "similarity": 0.90,
+                            "is_research_article": True
+                        })
+                    
+            return graph_docs
+        except Exception as e:
+            logger.warning(f"Graph-Augmented Retrieval fallback triggered: {e}. Relying on vector search.")
             return []
 
     def retrieve_for_diseases(

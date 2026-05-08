@@ -1,188 +1,220 @@
-"""
-models/mmcows/health_scorer.py
-===============================
-Production wrapper for MultiModalFusion + SensorAutoencoder.
-Fuses visual embeddings (512-dim from CowReIDModel) with sensor data (30-dim)
-to produce a health score and anomaly flag.
-"""
-
-from __future__ import annotations
-
+import app.numpy_hack
 import logging
 import math
 import os
 import time
-from typing import Any, Dict, Optional
+import pickle
+from typing import Any, Dict, Optional, List
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from PIL import Image
 
-try:
-    import timm
-except ImportError:
-    timm = None
-
 logger = logging.getLogger(__name__)
 
-from models.mmcows.original_models import MultiModalFusion, SensorAutoencoder, CowReIDModel
+from models.mmcows.health_transformer import HealthRiskTransformer
 
 
 class HealthScorer:
-    SAVED_MODELS_DIR = r"C:\Users\Dell\.gemini\antigravity\graduation project\Mmcows\mmcows\mmcow\saved_models"
+    """
+    Production wrapper for HealthRiskTransformer (Task 5).
+    Predicts current and future (24h) health risk scores based on 48h sensor windows.
+    """
+    
+    FEATURE_COLS = [
+        'cbt', 'cbt_dev', 'cbt_trend', 'cbt_r6', 'cbt_r24',
+        'milk_kg', 'milk_drop_pct', 'milk_kg_r6', 'milk_kg_r24',
+        'accel_mag', 'activity_drop', 'accel_mag_r6',
+        'lying_frac',
+        'health_score_r6', 'health_score_r24',
+        'hour_sin', 'hour_cos', 'day_sin', 'day_cos',
+        'has_event'
+    ]
 
-    def __init__(self, mmcows_base_path: str, device: str = None):
+    def __init__(self, checkpoint_path: str, scaler_path: str, device: str = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.base_path = mmcows_base_path
-        self._fusion_model = None
-        self._anomaly_model = None
-        self._id_backbone = None
+        self.model = None
+        self.scaler = None
         self._available = False
-        self._load_models(self.SAVED_MODELS_DIR)
-        logger.info(f"HealthScorer (Fusion) ready | models_loaded={self._available}")
+        self._load_assets(checkpoint_path, scaler_path)
+        logger.info(f"HealthScorer (Transformer) ready | available={self._available}")
 
-    def _load_models(self, models_dir: str):
+    def _load_assets(self, checkpoint_path: str, scaler_path: str):
         try:
-            # 1. MultiModalFusion: visual_dim=512, sensor_dim=30
-            self._fusion_model = MultiModalFusion(visual_dim=512, sensor_dim=30, hidden_dim=256)
-            fusion_path = os.path.join(models_dir, "fusion_model.pth")
-            if os.path.exists(fusion_path):
-                state = torch.load(fusion_path, map_location=self.device, weights_only=False)
-                self._fusion_model.load_state_dict(state, strict=False)
-                self._fusion_model.to(self.device).eval()
-                logger.info(f"Fusion model loaded from {fusion_path}")
+            # 1. Load Scaler
+            if os.path.exists(scaler_path):
+                with open(scaler_path, 'rb') as f:
+                    self.scaler = pickle.load(f)
+                logger.info(f"Health scaler loaded from {scaler_path}")
             else:
-                logger.warning(f"Fusion model not found at {fusion_path}")
+                logger.warning(f"Health scaler not found at {scaler_path}")
 
-            # 2. SensorAutoencoder — input_dim=512 (matches vis_embed)
-            self._anomaly_model = SensorAutoencoder(input_dim=512, latent_dim=64)
-            anomaly_path = os.path.join(models_dir, "anomaly_autoencoder.pth")
-            if os.path.exists(anomaly_path):
-                state = torch.load(anomaly_path, map_location=self.device, weights_only=False)
-                self._anomaly_model.load_state_dict(state, strict=False)
-                self._anomaly_model.to(self.device).eval()
-                logger.info(f"Anomaly model loaded from {anomaly_path}")
+            # 2. Instantiate Model
+            self.model = HealthRiskTransformer(
+                in_dim=len(self.FEATURE_COLS),
+                d_model=128,
+                n_heads=8,
+                n_layers=4,
+                dropout=0.2,
+                forecast_h=24
+            )
+
+            # 3. Load Checkpoint
+            if os.path.exists(checkpoint_path):
+                state = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+                
+                # Extract state dict if nested
+                if "model_state" in state:
+                    state = state["model_state"]
+                elif "state_dict" in state:
+                    state = state["state_dict"]
+                
+                # Handle DataParallel wrap if present in checkpoint
+                if any(k.startswith('module.') for k in state.keys()):
+                    state = {k.replace('module.', ''): v for k, v in state.items()}
+                
+                self.model.load_state_dict(state, strict=False)
+                self.model.to(self.device).eval()
+                logger.info(f"Health model loaded from {checkpoint_path}")
+                self._available = True
             else:
-                logger.warning(f"Anomaly model not found at {anomaly_path}")
+                logger.warning(f"Health model not found at {checkpoint_path}")
 
-            # 3. CowReIDModel backbone for visual embeddings
-            self._id_backbone = CowReIDModel(pretrained=True)
-            id_path = os.path.join(models_dir, "identification_model.pth")
-            if os.path.exists(id_path):
-                state = torch.load(id_path, map_location=self.device, weights_only=False)
-                self._id_backbone.load_state_dict(state, strict=False)
-                self._id_backbone.to(self.device).eval()
-                logger.info(f"ID backbone loaded from {id_path}")
-
-            self._available = True
         except Exception as e:
-            logger.error(f"Failed to load HealthScorer models: {e}", exc_info=True)
+            logger.error(f"Failed to load HealthScorer assets: {e}", exc_info=True)
 
-    @staticmethod
-    def _preprocess_image(crop: Image.Image) -> torch.Tensor:
-        from torchvision import transforms
-        transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        return transform(crop.convert("RGB")).unsqueeze(0)
+    def engineer_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Implements Cell 5 engineering logic for a single cow's window.
+        Input df should have: timestamp, hour, day, cbt, milk_kg, accel_mag, lying_frac, health_score, has_event
+        """
+        df = df.copy()
+        
+        # Ensure critical columns exist for calculation
+        if 'hour' not in df.columns: df['hour'] = pd.Timestamp.now().hour
+        if 'day' not in df.columns: df['day'] = 0
+        if 'cbt' not in df.columns: df['cbt'] = 38.5
+        if 'milk_kg' not in df.columns: df['milk_kg'] = 22.0
+        if 'accel_mag' not in df.columns: df['accel_mag'] = 2.0
+        if 'lying_frac' not in df.columns: df['lying_frac'] = 0.5
+        if 'health_score' not in df.columns: df['health_score'] = 50.0
+
+        # Ensure sorted
+        sort_col = next((c for c in df.columns if c.lower() in ('timestamp', 'datetime', 'time')), None)
+        if sort_col:
+            df = df.sort_values(sort_col).reset_index(drop=True)
+        else:
+            df = df.reset_index(drop=True)
+        
+        # Cyclical time
+        df['hour_sin'] = np.sin(2 * np.pi * df['hour'].astype(float) / 24)
+        df['hour_cos'] = np.cos(2 * np.pi * df['hour'].astype(float) / 24)
+        df['day_sin']  = np.sin(2 * np.pi * (df['day'].astype(float) % 14) / 14)
+        df['day_cos']  = np.cos(2 * np.pi * (df['day'].astype(float) % 14) / 14)
+
+        # Baselines (for dev/drop features)
+        # In a real window, we might use global means or window means
+        cbt_b = 38.5
+        milk_b = 22.0
+        accel_b = 2.0
+        
+        df['cbt_dev'] = df['cbt'] - cbt_b
+        df['cbt_trend'] = df['cbt'].diff().fillna(0)
+        df['milk_drop_pct'] = ((milk_b - df['milk_kg']) / (milk_b + 1e-6)).clip(0, 1) * 100
+        df['activity_drop'] = ((accel_b - df['accel_mag']) / (accel_b + 1e-6)).clip(0, 1) * 100
+
+        # Rolling averages
+        for col in ['cbt', 'milk_kg', 'accel_mag', 'health_score']:
+            if col in df.columns:
+                df[f'{col}_r6']  = df[col].rolling(6,  min_periods=1).mean()
+                df[f'{col}_r24'] = df[col].rolling(24, min_periods=1).mean()
+        
+        return df
 
     def predict(
         self,
-        cow_crop: Optional[Image.Image] = None,
-        cow_id: int = None,
-        sensor_data: Optional[np.ndarray] = None
+        cow_id: str,
+        history_df: pd.DataFrame
     ) -> Dict[str, Any]:
-        """Unified Health Score prediction using Multi-Modal Fusion."""
+        """
+        Predict health risk using 48-hour history.
+        history_df: DataFrame with raw sensor columns.
+        """
         t0 = time.perf_counter()
 
         if not self._available:
-            return {"error": "Models not loaded", "health_score": 0.5, "status": "error"}
+            return {"error": "Model/Scaler not loaded", "status": "error"}
 
-        # 1. Extract Visual Embedding (512-dim)
-        vis_embed = torch.zeros((1, 512)).to(self.device)
-        if cow_crop is not None:
-            try:
-                img_tensor = self._preprocess_image(cow_crop).to(self.device)
-                with torch.no_grad():
-                    vis_embed = self._id_backbone(img_tensor)
-                    # Ensure correct shape [1, 512]
-                    if vis_embed.ndim == 1:
-                        vis_embed = vis_embed.unsqueeze(0)
-            except Exception as e:
-                logger.warning(f"Visual embedding failed: {e}")
-
-        # 2. Prepare Sensor Features (30-dim)
-        sensor_tensor = torch.zeros((1, 30)).to(self.device)
-        if sensor_data is not None:
-            try:
-                arr = np.array(sensor_data, dtype=np.float32).flatten()
-                # Pad or trim to exactly 30
-                if len(arr) < 30:
-                    arr = np.pad(arr, (0, 30 - len(arr)))
-                else:
-                    arr = arr[:30]
-                # Replace NaN/inf
-                arr = np.nan_to_num(arr, nan=0.0, posinf=1.0, neginf=0.0)
-                sensor_tensor = torch.FloatTensor(arr).unsqueeze(0).to(self.device)
-            except Exception as e:
-                logger.warning(f"Sensor tensor prep failed: {e}")
-
-        # 3. Run Fusion + Anomaly
-        health_score = 0.5
-        anomaly_score = 0.0
-        fusion_succeeded = False
         try:
+            # 1. Feature Engineering
+            processed = self.engineer_features(history_df)
+            
+            # 2. Select and Scale Features
+            X = processed[self.FEATURE_COLS].fillna(0).values
+            if self.scaler:
+                X = self.scaler.transform(X)
+            
+            # 3. Ensure sequence length (48)
+            if len(X) < 48:
+                # Pad start with zeros
+                pad = np.zeros((48 - len(X), len(self.FEATURE_COLS)))
+                X = np.vstack([pad, X])
+            else:
+                X = X[-48:] # Take last 48 hours
+            
+            X_tensor = torch.FloatTensor(X).unsqueeze(0).to(self.device)
+
+            # 4. Inference
             with torch.no_grad():
-                score_tensor, _, _ = self._fusion_model(vis_embed, sensor_tensor)
-                hs = float(score_tensor.cpu().item())
-                # Guard against NaN/Inf
-                if math.isnan(hs) or math.isinf(hs):
-                    logger.warning(f"Fusion returned NaN/Inf health score for cow {cow_id}, using 0.5")
-                    hs = 0.5
-                health_score = max(0.0, min(1.0, hs))
-                fusion_succeeded = True
+                score_now, score_future, feat_w = self.model(X_tensor)
+                
+                now_val = float(score_now.cpu().item())
+                future_vals = score_future.cpu().numpy().flatten().tolist()
+                feat_attn = feat_w.cpu().numpy().flatten().tolist()
 
-                # Anomaly on vis_embed (512-dim)
-                recon_err = self._anomaly_model.compute_anomaly_score(vis_embed)
-                anom = float(recon_err.cpu().item())
-                if math.isnan(anom) or math.isinf(anom):
-                    anom = 0.0
-                anomaly_score = max(0.0, anom)
+            # 5. Clinical Heuristic Overrides (Safety Layer)
+            # Ensure extreme vitals always trigger high risk even if model is biased
+            last_cbt = float(history_df.iloc[-1]['cbt'])
+            last_milk_drop = float(processed.iloc[-1].get('milk_drop_pct', 0))
+            
+            # Fever heuristics
+            if last_cbt >= 40.5:
+                now_val = max(now_val, 85.0) # Critical
+                logger.info(f"Heuristic Trigger: High Fever ({last_cbt}) -> Risk boosted to {now_val}")
+            elif last_cbt >= 39.5:
+                now_val = max(now_val, 60.0) # At-Risk
+                logger.info(f"Heuristic Trigger: Fever ({last_cbt}) -> Risk boosted to {now_val}")
+                
+            # Milk drop heuristics
+            if last_milk_drop >= 40.0:
+                now_val = max(now_val, 70.0)
+                logger.info(f"Heuristic Trigger: Severe Milk Drop ({last_milk_drop}%) -> Risk boosted to {now_val}")
+
+            # Interpretation
+            risk_level = "Healthy"
+            if now_val >= 75: risk_level = "Critical"
+            elif now_val >= 50: risk_level = "At-Risk"
+            elif now_val >= 25: risk_level = "Watch"
+
+            return {
+                "cow_id": cow_id,
+                "current_risk": round(now_val, 2),
+                "forecast_24h": [round(v, 2) for v in future_vals],
+                "risk_level": risk_level,
+                "feature_importance": dict(zip(self.FEATURE_COLS, [round(f, 4) for f in feat_attn])),
+                "recommendations": self._get_recs(risk_level, now_val),
+                "inference_time_ms": round((time.perf_counter() - t0) * 1000, 2),
+                "status": "success"
+            }
+
         except Exception as e:
-            logger.warning(f"Fusion/Anomaly inference failed for cow {cow_id}: {e}")
+            logger.error(f"Health prediction failed for cow {cow_id}: {e}")
+            return {"error": str(e), "status": "error"}
 
-        # Interpretation
-        anomaly_detected = anomaly_score > 0.15
-        risk_level = "low"
-        if health_score < 0.4 or anomaly_detected:
-            risk_level = "high"
-        elif health_score < 0.7:
-            risk_level = "medium"
-
-        hs_pct = f"{health_score:.1%}"
-        if anomaly_detected:
-            hs_display = f"ANOMALY ({hs_pct})"
-        else:
-            hs_display = hs_pct
-
-        return {
-            "health_score": hs_display,
-            "raw_health_score": round(health_score, 4),
-            "anomaly_score": round(anomaly_score, 4),
-            "anomaly_detected": anomaly_detected,
-            "risk_level": risk_level,
-            "cow_id": cow_id,
-            "fusion_succeeded": fusion_succeeded,
-            "recommendations": self._get_recs(risk_level, anomaly_detected),
-            "inference_time_ms": round((time.perf_counter() - t0) * 1000, 2),
-            "status": "success"
-        }
-
-    def _get_recs(self, risk, anomaly):
-        if risk == "high": return ["🔴 High clinical risk. Immediate vet inspection."]
-        if anomaly: return ["⚠️ Sensor anomaly detected. Check equipment or behavioral deviations."]
-        if risk == "medium": return ["🟡 Moderate risk. Monitor clinical signs."]
-        return ["🟢 Stable health status."]
+    def _get_recs(self, level: str, score: float) -> List[str]:
+        if level == "Critical": return ["🔴 CRITICAL RISK. Immediate veterinary intervention required."]
+        if level == "At-Risk": return ["🟠 AT-RISK. Clinical signs likely; schedule inspection today."]
+        if level == "Watch": return ["🟡 WATCH. Behavioral deviations detected; monitor closely."]
+        return ["🟢 HEALTHY. No significant health risks detected."]

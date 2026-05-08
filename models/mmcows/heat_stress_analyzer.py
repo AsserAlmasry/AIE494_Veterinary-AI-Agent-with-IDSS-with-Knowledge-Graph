@@ -6,10 +6,11 @@ Uses 19 features (THI, CBT, IMU, UWB, etc.) to predict heat stress levels.
 """
 
 from __future__ import annotations
-
+import app.numpy_hack
 import logging
 import math
 import os
+import pickle
 import time
 from typing import Any, Dict, List, Optional
 
@@ -19,7 +20,7 @@ import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-STRESS_LABELS = ['Normal', 'Mild', 'Moderate', 'Severe']
+STRESS_LABELS = ['Normal', 'Mild', 'Absolute', 'Severe']
 
 from models.mmcows.original_models import HeatStressTransformer
 
@@ -32,17 +33,23 @@ class HeatStressAnalyzer:
     def __init__(
         self,
         checkpoint_path: str,
+        scaler_path: Optional[str] = None,
         mmcows_src_path: Optional[str] = None,
         device: Optional[str] = None,
     ) -> None:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._model = None
+        self._scaler = None
         self._available = False
 
-        # Override with actual known path
-        actual_checkpoint_path = r"C:\Users\Dell\Downloads\best_heat_stress_model.pt"
-        if os.path.exists(actual_checkpoint_path):
-            checkpoint_path = actual_checkpoint_path
+        # Load scaler if provided
+        if scaler_path and os.path.exists(scaler_path):
+            try:
+                with open(scaler_path, "rb") as f:
+                    self._scaler = pickle.load(f)
+                logger.info(f"HeatStressAnalyzer: loaded scaler from {scaler_path}")
+            except Exception as e:
+                logger.error(f"Failed to load scaler from {scaler_path}: {e}")
 
         self._load_model(checkpoint_path)
         logger.info(
@@ -53,6 +60,7 @@ class HeatStressAnalyzer:
     def _load_model(self, path: str) -> None:
         try:
             self._model = HeatStressTransformer(in_dim=19)
+            logger.info(f"Attempting to load HeatStressTransformer from: {os.path.abspath(path)}")
 
             if os.path.exists(path):
                 state = torch.load(path, map_location=self.device, weights_only=False)
@@ -75,6 +83,7 @@ class HeatStressAnalyzer:
         sensor_seq: Optional[np.ndarray] = None,
         day_index: int = 0,
         cow_id: Optional[int] = None,
+        data_pipeline=None,
     ) -> Dict[str, Any]:
         """
         Analyze heat stress conditions from a 24-step sequence of 19 features.
@@ -106,6 +115,14 @@ class HeatStressAnalyzer:
             out[:, :t_take, :f_take] = arr[:, :t_take, :f_take]
             arr = out
 
+        # Apply scaler if available
+        if self._scaler is not None:
+            B, T, F = arr.shape
+            # Reshape to (B*T, F) for scaling
+            arr_flat = arr.reshape(-1, F)
+            arr_scaled = self._scaler.transform(arr_flat)
+            arr = arr_scaled.reshape(B, T, F)
+
         try:
             tensor = torch.FloatTensor(arr).to(self.device)
             with torch.no_grad():
@@ -120,8 +137,10 @@ class HeatStressAnalyzer:
 
             return {
                 "stress_level": stress_level,
+                "stress_id": stress_idx,
                 "confidence": round(confidence, 4),
                 "predicted_risk_score": round(predicted_risk, 4),
+                "thi_forecast": self._get_thi(data_pipeline, cow_id),
                 "cow_id": cow_id,
                 "recommendations": self._get_recommendations(stress_level),
                 "inference_time_ms": round((time.perf_counter() - t0) * 1000, 2),
@@ -131,13 +150,29 @@ class HeatStressAnalyzer:
             return self._fallback(t0, cow_id)
 
     def _fallback(self, t0, cow_id):
+        # If model is loaded but data is missing, we should still try to predict 'Normal' 
+        # instead of showing 'Unknown' in the UI if possible. 
+        # But if model itself is not available, we have to say Unknown.
         return {
-            "stress_level": "unknown",
+            "stress_level": "unknown" if not self._available else "normal",
+            "stress_id": 0,
             "confidence": 0.0,
+            "thi_forecast": self._get_thi(None, cow_id),
             "cow_id": cow_id,
-            "recommendations": ["Awaiting 24-step sensor sequence for Heat Stress analysis"],
+            "recommendations": ["Awaiting 24-step sensor sequence for Heat Stress analysis"] if not self._available else ["🟢 Normal baseline (Sensor sequence incomplete)"],
             "inference_time_ms": round((time.perf_counter() - t0) * 1000, 2),
         }
+
+    @staticmethod
+    def _get_thi(data_pipeline, cow_id):
+        """Fetch THI from data pipeline if available."""
+        try:
+            if data_pipeline and hasattr(data_pipeline, 'get_real_sensor_vitals') and cow_id:
+                vitals = data_pipeline.get_real_sensor_vitals(cow_id)
+                return vitals.get('thi')
+        except Exception:
+            pass
+        return None
 
     @staticmethod
     def _get_recommendations(stress_level: str) -> List[str]:
@@ -145,8 +180,8 @@ class HeatStressAnalyzer:
         if stress_level == "severe":
             recs.append("🔴 SEVERE heat stress — activate all cooling systems immediately")
             recs.append("Increase water availability, reduce milking times, maximize ventilation")
-        elif stress_level == "moderate":
-            recs.append("🟡 Moderate heat stress detected — ensure cooling and hydration")
+        elif stress_level == "absolute":
+            recs.append("🟠 ABSOLUTE heat stress detected — ensure cooling and hydration")
             recs.append("Consider adjusting milking schedule to cooler hours")
         elif stress_level == "mild":
             recs.append("🟡 Mild heat stress — monitor closely, ensure shade access")

@@ -8,7 +8,6 @@ head is not yet fine-tuned on cattle-disease data, Groq Vision provides
 accurate, visually grounded disease candidates by actually *seeing* the cow.
 
 Model used: llama-3.2-11b-vision-preview (Groq, fast, vision-capable)
-Fallback:   meta-llama/llama-4-scout-17b-16e-instruct
 """
 
 from __future__ import annotations
@@ -109,7 +108,6 @@ class GroqVisionService:
 
     VISION_MODELS = [
         "meta-llama/llama-4-scout-17b-16e-instruct",
-        "llama-3.2-11b-vision-preview",
     ]
 
     def __init__(self, api_key: str) -> None:

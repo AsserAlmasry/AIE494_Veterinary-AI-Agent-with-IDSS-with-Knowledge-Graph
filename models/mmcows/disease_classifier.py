@@ -5,7 +5,7 @@ import logging
 import torch
 import torch.nn as nn
 from PIL import Image
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -50,9 +50,11 @@ class MaxVitDiseaseService:
         'Healthy'
     ]
 
-    def __init__(self, model_path: str = r"C:\Users\Dell\Downloads\best_model.pth", device: str = None):
+    def __init__(self, model_path: Optional[str] = None, device: str = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model_path = model_path
+        from app.config import get_settings
+        s = get_settings()
+        self.model_path = model_path or s.disease_model_path
         self._available = False
         self._model = None
         self._load_model()

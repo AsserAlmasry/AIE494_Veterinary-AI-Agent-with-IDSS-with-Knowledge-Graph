@@ -38,3 +38,12 @@ debug_*.jpg
 temp_*.py
 test_*.py
 verify_*.py
+# Ignore untracked specific files
+debug_server_v2.log
+test_out.txt
+venv312/
+bovine_iq/temp_images/
+graduation project models/
+kb_cache/
+
+notebook_summary.txt

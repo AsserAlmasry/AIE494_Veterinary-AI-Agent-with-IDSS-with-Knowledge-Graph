@@ -6,6 +6,8 @@ Now wired to the REAL MMCOWS models instead of fake checkpoints.
 from __future__ import annotations
 from functools import lru_cache
 from app.config import get_settings
+import logging
+logger = logging.getLogger(__name__)
 
 # ── MMCOWS Model Factories ──────────────────────────────────────────────────
 
@@ -25,7 +27,7 @@ def get_milk_predictor():
     s = get_settings()
     return MilkProductivityPredictor(
         checkpoint_path=s.milk_prediction_model_path,
-        mmcows_src_path=s.mmcows_src_path,
+        # mmcows_src_path is now handled internally or removed
     )
 
 @lru_cache(maxsize=1)
@@ -34,6 +36,7 @@ def get_heat_stress_analyzer():
     s = get_settings()
     return HeatStressAnalyzer(
         checkpoint_path=s.behavior_model_path,
+        scaler_path=s.heat_stress_scaler_path,
         mmcows_src_path=s.mmcows_src_path,
     )
 
@@ -42,7 +45,8 @@ def get_health_scorer():
     from models.mmcows.health_scorer import HealthScorer
     s = get_settings()
     return HealthScorer(
-        mmcows_base_path=s.mmcows_base_path,
+        checkpoint_path=s.health_model_path,
+        scaler_path=s.health_scaler_path,
     )
 
 @lru_cache(maxsize=1)
@@ -57,10 +61,23 @@ def get_data_pipeline():
 def get_rag_service():
     from services.rag_service import VeterinaryRAGService
     s = get_settings()
+    # FORCE OVERRIDE: Using L6 for best balance of accuracy and speed
+    forced_model = "sentence-transformers/all-MiniLM-L6-v2"
+    logger.info(f"!!! FORCING RAG MODEL: {forced_model} !!!")
+    
+    neo4j = None
+    try: neo4j = get_neo4j_service()
+    except Exception: pass
+
     return VeterinaryRAGService(
-        persist_dir=s.chroma_persist_dir, embedding_model=s.rag_embedding_model,
-        chunk_size=s.rag_chunk_size, chunk_overlap=s.rag_chunk_overlap,
-        top_k=s.rag_top_k, kb_cache_path=s.kb_cache_path, hf_token=s.hf_token,
+        persist_dir=s.chroma_persist_dir, 
+        embedding_model=forced_model,
+        chunk_size=s.rag_chunk_size, 
+        chunk_overlap=s.rag_chunk_overlap,
+        top_k=s.rag_top_k, 
+        kb_cache_path=s.kb_cache_path, 
+        hf_token=s.hf_token,
+        neo4j_service=neo4j
     )
 
 @lru_cache(maxsize=1)
@@ -74,14 +91,25 @@ def get_llm_service():
 def get_neo4j_service():
     from services.neo4j_service import Neo4jService
     s = get_settings()
-    return Neo4jService(uri=s.neo4j_uri, user=s.neo4j_user,
-                        password=s.neo4j_password, database=s.neo4j_database)
+    
+    # HARD OVERRIDE: If the settings still show the default 'neo4j' user, 
+    # we force it to the correct one to bypass environment loading issues.
+    final_user = s.neo4j_user
+    if final_user == "neo4j":
+        final_user = "43b30b0c"
+        logger.warning(f"!!! CONFIG MISMATCH DETECTED: Forcing Neo4j User to {final_user} !!!")
+    
+    return Neo4jService(
+        uri=s.neo4j_uri, 
+        user=final_user,
+        password=s.neo4j_password, 
+        database=None # Let it default to default database
+    )
 
 @lru_cache(maxsize=1)
 def get_disease_service():
     from models.mmcows.disease_classifier import MaxVitDiseaseService
-    s = get_settings()
-    return MaxVitDiseaseService(model_path=r"C:\Users\Dell\Downloads\best_model.pth")
+    return MaxVitDiseaseService()
 
 @lru_cache(maxsize=1)
 def get_safety_engine():

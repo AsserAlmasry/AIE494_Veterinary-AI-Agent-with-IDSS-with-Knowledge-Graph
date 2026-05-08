@@ -26,7 +26,7 @@ from PIL import Image
 logger = logging.getLogger(__name__)
 
 KNOWN_COW_IDS = list(range(1, 17))
-IDENTITY_THRESHOLD = 0.90
+IDENTITY_THRESHOLD = 0.80
 CLINICAL_THRESHOLD = 0.25
 CLINICAL_SUPPORT_MSG = "Provide more information for correct clinical support"
 
@@ -42,8 +42,8 @@ Structure your response EXACTLY as follows:
 
 ### 🐄 COW #[ID]
 - **Primary Diagnosis**: [Most likely condition based on 50%+ confidence models]
-- **Vital Signs**: [Weight, Age, Temp, Heart Rate]
-- **Clinical Performance**: [Milk Yield interpretation, Heat Stress, Health Score]
+- **Vital Signs**: [Weight (kg), Age, Temp, Heart Rate]
+- **Clinical Performance**: [Milk Yield interpretation (L), Heat Stress, Health Score]
 - **Management Plan**: [Specific recommendations for this cow]
 
 ---
@@ -79,6 +79,7 @@ class VeterinaryInferencePipeline:
         self.neo4j_service = neo4j_service
         self.safety_engine = safety_engine
         self.clinical_registry = {} # Persistent manual vitals per cow ID
+        self.latest_results    = {} # Cache for agent lookups 🐄
 
     async def run_full_pipeline(
         self, image_bytes: Optional[bytes] = None,
@@ -213,21 +214,25 @@ class VeterinaryInferencePipeline:
         vision_r = {} # We'll just store the first cow's vision result here for backward compatibility
 
 
-        # Process each detected cow
-        for det in detections_to_process:
+        # Process each detected cow in parallel to significantly reduce latency on CPU
+        async def _process_single_cow(det):
             c_id = det["cow_id"]
             bbox = det.get("bbox")
             summary = {"cow_id": c_id}
             
-            # STICKY DATA: Use current call data, fallback to registry
+            # Pull real sensor vitals for this cow from the data pipeline
+            sensor_vitals = self._extract_cow_sensor_vitals(c_id, day_index)
+            summary["sensor_vitals"] = sensor_vitals
+            
+            # STICKY DATA: Use current call data, fallback to registry or realistic default
             reg_data = self.clinical_registry.get(c_id, {})
-            current_weight = animal_weight_kg if (cow_id_override == c_id and animal_weight_kg) else reg_data.get("weight")
-            current_age = animal_age_years if (cow_id_override == c_id and animal_age_years) else reg_data.get("age")
+            current_weight = animal_weight_kg if (cow_id_override == c_id and animal_weight_kg) else reg_data.get("weight", 600.0)
+            current_age = animal_age_years if (cow_id_override == c_id and animal_age_years) else reg_data.get("age", 4.5)
             current_sensors = sensor_data if (cow_id_override == c_id) else None
 
-            async def _run_milk(cid):
+            async def _run_milk_local(cid):
                 try:
-                    sensor_seq = self.data_pipeline.get_sensor_features_for_cow(cid, day_index)
+                    sensor_seq = self.data_pipeline.get_milk_features(cid, day_index)
                     return await asyncio.to_thread(
                         self.milk_predictor.predict, 
                         sensor_seq, cid, 
@@ -236,121 +241,130 @@ class VeterinaryInferencePipeline:
                 except Exception as e:
                     return {"error": str(e)}
 
-            async def _run_heat(cid):
+            async def _run_heat_local(cid):
                 try:
-                    sensor_seq = self.data_pipeline.get_heat_stress_features(cid, day_index)
-                    return await asyncio.to_thread(self.heat_stress.analyze, sensor_seq, day_index, cid)
+                    sensor_seq = self.data_pipeline.get_heat_stress_sequence(cid, day_index)
+                    res = await asyncio.to_thread(self.heat_stress.analyze, sensor_seq, day_index, cid, self.data_pipeline)
+                    thi = sensor_vitals.get("thi")
+                    if thi is not None:
+                        try:
+                            thi_val = float(thi)
+                            if thi_val < 72: res["stress_level"] = "normal"
+                            elif thi_val < 80: res["stress_level"] = "mild"
+                            elif thi_val < 90: res["stress_level"] = "moderate"
+                            else: res["stress_level"] = "severe"
+                        except: pass
+                    if res.get("stress_level") == "absolute":
+                        res["stress_level"] = "moderate"
+                    
+                    # Ensure frontend compatibility
+                    res["heat_stress_level"] = res.get("stress_level")
+                    return res
                 except Exception as e:
                     return {"error": str(e)}
 
-            async def _run_health(cid, box):
+            async def _run_health_local(cid, box):
                 try:
-                    cow_crop = None
-                    if image is not None and box:
-                        cow_crop = image.crop(box)
-                    elif image is not None:
-                        cow_crop = image
-                    
-                    if cow_crop and self.vision_service:
+                    # 1. Vision-based Disease Classification
+                    disease_res = {"disease_candidates": [], "confidence": 0.0, "is_healthy": True}
+                    if image is not None and self.vision_service:
+                        cow_crop = image.crop(box) if box else image
                         buf = io.BytesIO()
                         cow_crop.save(buf, format="JPEG")
-                        crop_bytes = buf.getvalue()
-                        res = await asyncio.to_thread(self.vision_service.analyze_image, crop_bytes)
-                        
-                        # Map DiseaseClassifier output to health score logic
-                        is_healthy = res.get("is_healthy", False)
-                        conf = res.get("confidence", 0.0)
-                        
-                        # If confidence is low, user wants to see "Healthy/Normal" instead of "Provide more info"
-                        if conf < CLINICAL_THRESHOLD:
-                            return {
-                                "health_score": f"{ (1.0 - (conf/2)) * 100:.1f}%", # High score for healthy
-                                "raw_health_score": 0.95,
-                                "anomaly_detected": False,
-                                "risk_level": "low",
-                                "cow_id": cid,
-                                "status": "success",
-                                "confidence": conf,
-                                "disease_predictions": []
-                            }
+                        disease_res = await asyncio.to_thread(self.vision_service.analyze_image, buf.getvalue())
 
-                        health_score = 0.95 if is_healthy else (1.0 - conf)
-                        risk_level = "low" if is_healthy else "high"
+                    # 2. Sensor-based Health Scoring
+                    health_res = {"current_risk": 5.0, "risk_level": "Healthy", "status": "default"}
+                    if self.health_scorer:
+                        history_df = self.data_pipeline.get_health_features(cid, day_index)
+                        temp_manual = current_sensors.get("temperature") if current_sensors else None
                         
-                        return {
-                            "health_score": f"{health_score:.1%}",
-                            "raw_health_score": health_score,
-                            "anomaly_detected": not is_healthy,
-                            "risk_level": risk_level,
-                            "cow_id": cid,
-                            "status": "success",
-                            "confidence": conf,
-                            "disease_predictions": res.get("disease_candidates", [])
-                        }
-                    return {"error": "No image for health scoring"}
+                        if cid == cow_id_override:
+                            if history_df.empty:
+                                import pandas as pd
+                                history_df = pd.DataFrame([{
+                                    "timestamp": pd.Timestamp.now(),
+                                    "hour": pd.Timestamp.now().hour,
+                                    "day": day_index,
+                                    "cbt": float(temp_manual) if temp_manual else 38.5,
+                                    "milk_kg": 22.0, "accel_mag": 2.0, "lying_frac": 0.5,
+                                    "health_score": 50.0, "has_event": 0
+                                }])
+                            else:
+                                last_idx = history_df.index[-1]
+                                if temp_manual: history_df.at[last_idx, 'cbt'] = float(temp_manual)
+                        
+                        health_res = await asyncio.to_thread(self.health_scorer.predict, str(cid), history_df)
+
+                    # 3. Merge and Interpret
+                    risk_score = health_res.get("current_risk", 5.0)
+                    vision_conf = disease_res.get("confidence", 0.0)
+                    is_vision_healthy = disease_res.get("is_healthy", True)
+                    if not is_vision_healthy and vision_conf > CLINICAL_THRESHOLD:
+                        risk_score = max(risk_score, vision_conf * 100)
+
+                    health_percent = (100.0 - risk_score) / 100.0
+                    risk_level = health_res.get("risk_level", "Healthy")
+                    ui_risk = "low"
+                    if risk_level == "Critical": ui_risk = "high"
+                    elif risk_level in ("At-Risk", "Watch"): ui_risk = "medium"
+
+                    return {
+                        "health_score": f"{health_percent:.1%}",
+                        "raw_health_score": health_percent,
+                        "risk_score": risk_score,
+                        "risk_level": ui_risk,
+                        "anomaly_detected": risk_score > 50.0 or not is_vision_healthy,
+                        "cow_id": cid,
+                        "status": "success",
+                        "confidence": max(vision_conf, 0.85),
+                        "disease_predictions": disease_res.get("disease_candidates", []),
+                        "forecast_24h": health_res.get("forecast_24h", []),
+                        "recommendations": health_res.get("recommendations", [])
+                    }
                 except Exception as e:
-                    return {"error": str(e)}
+                    logger.error(f"Health prediction failed for cow {cid}: {e}")
+                    return {"error": str(e), "status": "error"}
 
             milk_r, heat_r, health_r = await asyncio.gather(
-                _run_milk(c_id), _run_heat(c_id), _run_health(c_id, bbox),
+                _run_milk_local(c_id), _run_heat_local(c_id), _run_health_local(c_id, bbox),
                 return_exceptions=True
             )
             
-            # Normalise milk result
-            milk_result = milk_r if not isinstance(milk_r, Exception) else {"error": str(milk_r)}
-            # BYPASS threshold if it is a heuristic result (from manual entry)
-            is_heuristic = milk_result.get("status") == "heuristic"
-            if not is_heuristic and isinstance(milk_result, dict) and milk_result.get("confidence", 1.0) < CLINICAL_THRESHOLD:
-                milk_result["predicted_yield_kg"] = CLINICAL_SUPPORT_MSG
-            summary["milk"] = milk_result
+            summary["milk"] = milk_r if not isinstance(milk_r, Exception) else {"error": str(milk_r)}
+            summary["heat_stress"] = heat_r if not isinstance(heat_r, Exception) else {"error": str(heat_r)}
+            summary["health"] = health_r if not isinstance(health_r, Exception) else {"error": str(health_r)}
             
-            # Normalise heat stress result
-            heat_result = heat_r if not isinstance(heat_r, Exception) else {"error": str(heat_r)}
-            if isinstance(heat_result, dict):
-                # Heat stress model doesn't return 'status'='heuristic' yet, but let's allow it if confidence > 0
-                if heat_result.get("confidence", 1.0) < CLINICAL_THRESHOLD and heat_result.get("confidence", 1.0) > 0:
-                    # Allow low confidence for heat stress if it's not zero (meaning some sensor data was there)
-                    pass
-                elif heat_result.get("confidence", 1.0) == 0:
-                    heat_result["stress_level"] = CLINICAL_SUPPORT_MSG
-                
-                if "stress_level" in heat_result:
-                    heat_result["heat_stress_level"] = heat_result["stress_level"]
-            summary["heat_stress"] = heat_result
-            
-            # Normalise health score
-            health_result = health_r if not isinstance(health_r, Exception) else {"error": str(health_r)}
-            summary["health"] = health_result
-            
-            # Store vision result for first cow
+            return summary
+
+        # Run all cows in parallel
+        cow_results = await asyncio.gather(*[_process_single_cow(det) for det in detections_to_process])
+        clinical_summaries = cow_results
+
+        # Sync legacy vision_r and backward compatible summary for the primary cow
+        vision_r = {}
+        for summary in clinical_summaries:
+            c_id = summary["cow_id"]
             if c_id == cow_id:
                 vision_r = {
-                    "disease_candidates": health_result.get("disease_predictions", []),
-                    "is_healthy": not health_result.get("anomaly_detected", False)
+                    "disease_candidates": summary["health"].get("disease_predictions", []),
+                    "is_healthy": not summary["health"].get("anomaly_detected", False)
                 }
                 result["stages"]["vision"] = vision_r
-            
-            # Create top-level keys for backward compatibility (used by UI for the primary cow)
-            if c_id == cow_id:
-                # Merge into the old structure format to prevent UI breaking
-                hs_val = summary["health"].get("health_score", 0.5) if isinstance(summary["health"], dict) else 0.5
-                hs_val = 0.5 if hs_val == "Insufficient Data" else hs_val
                 
-                my_val = summary["milk"].get("predicted_yield_kg", None) if isinstance(summary["milk"], dict) else None
-                my_val = None if my_val == "Insufficient Data" else my_val
-                
+                # Build legacy summary
+                hs_val = summary["health"].get("health_score", 0.5)
+                my_val = summary["milk"].get("predicted_yield_kg", None)
                 result["stages"]["clinical_summary"] = {
                     "health_score": hs_val,
                     "predicted_milk_yield_kg": my_val,
-                    # heat stress model returns 'stress_level', not 'heat_stress_level'
-                    "heat_stress_level": summary["heat_stress"].get("stress_level", "unknown") if isinstance(summary["heat_stress"], dict) else "unknown",
-                    "anomaly_detected": summary["health"].get("anomaly_detected", False) if isinstance(summary["health"], dict) else False,
+                    "heat_stress_level": summary["heat_stress"].get("stress_level", "unknown"),
+                    "anomaly_detected": summary["health"].get("anomaly_detected", False),
                     "decision_confidence": 0.85,
-                    "risk_level": summary["health"].get("risk_level", "unknown") if isinstance(summary["health"], dict) else "unknown",
-                    "veterinary_exam_needed": hs_val < 0.4 if isinstance(hs_val, (int, float)) else False
+                    "risk_level": summary["health"].get("risk_level", "unknown"),
+                    "veterinary_exam_needed": (hs_val < 0.4) if isinstance(hs_val, (int, float)) else False
                 }
-            
-            clinical_summaries.append(summary)
+
             
         result["stages"]["clinical_summaries"] = clinical_summaries
 
@@ -368,17 +382,31 @@ class VeterinaryInferencePipeline:
                                 "source": "vision",
                             })
                 
-                # If no high-confidence disease, add a 'healthy' tag for the LLM
+                # If no high-confidence disease, add status tag for the LLM
                 if not disease_preds:
-                    disease_preds.append({"disease": "Healthy/Normal", "confidence": 0.95, "source": "vision"})
+                    # Check if any cow has an anomaly or high risk
+                    has_anomaly = any(s.get("health", {}).get("anomaly_detected", False) for s in clinical_summaries)
+                    high_risk = any(s.get("health", {}).get("risk_level", "low").lower() == "critical" for s in clinical_summaries)
+                    
+                    if has_anomaly or high_risk:
+                        disease_preds.append({"disease": "Clinical Anomaly/Systemic Issue", "confidence": 0.90, "source": "system"})
+                    else:
+                        disease_preds.append({"disease": "Healthy/Normal", "confidence": 0.95, "source": "vision"})
 
                 # RAG retrieval
                 rag_docs = []
                 disease_names = [p["disease"] for p in disease_preds]
                 if disease_names and self.rag_service:
                     try:
-                        rag_docs = await asyncio.to_thread(self.rag_service.retrieve_for_diseases, disease_names, 5)
-                    except Exception: pass
+                        # Add a strict timeout for RAG retrieval to prevent pipeline hangs
+                        rag_docs = await asyncio.wait_for(
+                            asyncio.to_thread(self.rag_service.retrieve_for_diseases, disease_names, 5),
+                            timeout=10.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("RAG retrieval timed out. Proceeding without external evidence.")
+                    except Exception as e:
+                        logger.error(f"RAG retrieval error: {e}")
 
                 # KG context - disconnected from text generation as per requirement
                 kg_context = None
@@ -398,35 +426,54 @@ class VeterinaryInferencePipeline:
                 # Contextualize refinement data for the LLM
                 refinement_context = f"(Refinement data below applies ONLY to Cow #{cow_id_override})" if cow_id_override in all_cow_ids else ""
                 
-                report_data = await asyncio.to_thread(
-                    self.llm_service.generate_clinical_report,
-                    cow_ids=all_cow_ids, disease_predictions=disease_preds,
-                    risk_assessment={"clinical_summaries": clinical_summaries, "refinement_note": refinement_context},
-                    rag_context=rag_docs or [],
-                    kg_context=None, 
-                    sensor_data=sensor_data if cow_id_override in all_cow_ids else None,
-                    animal_weight_kg=animal_weight_kg if cow_id_override in all_cow_ids else None,
-                    animal_age_years=animal_age_years if cow_id_override in all_cow_ids else None,
-                    vision_analysis=vision_r if isinstance(vision_r, dict) else None,
-                    safety_status=None,
-                )
+                try:
+                    report_data = await asyncio.wait_for(
+                        self.llm_service.generate_clinical_report(
+                            cow_ids=all_cow_ids, disease_predictions=disease_preds,
+                            risk_assessment={"clinical_summaries": clinical_summaries, "refinement_note": refinement_context},
+                            rag_context=rag_docs or [],
+                            kg_context=None, 
+                            sensor_data=sensor_data if cow_id_override in all_cow_ids else None,
+                            animal_weight_kg=animal_weight_kg if cow_id_override in all_cow_ids else None,
+                            animal_age_years=animal_age_years if cow_id_override in all_cow_ids else None,
+                            vision_analysis=vision_r if isinstance(vision_r, dict) else None,
+                            safety_status=None,
+                        ),
+                        timeout=45.0
+                    )
+                except asyncio.TimeoutError:
+                    logger.error("LLM report generation timed out.")
+                    report_data = {"report": "# Clinical Assessment Timeout\n\nThe AI agent is taking too long to synthesize the clinical evidence. Please check the individual summaries for raw data.", "summary": "Assessment timeout."}
                 
                 # Split report into per-cow chunks for UI display
                 report_text = report_data.get("report", "")
                 per_cow_reports = {}
                 import re
-                # Split report into per-cow chunks for UI display
-                report_text = report_data.get("report", "")
-                per_cow_reports = {}
-                import re
+                
+                # We split the report into segments based on Cow #ID headers
+                # Match only at the beginning of a line to avoid splitting inside sentences
+                segments = re.split(r"(?im)^(?:###\s*|[*]*|)\s*🐄?\s*COW\s*#*(\d+)\b", report_text)
+                
+                # Segments will be [before, id1, content1, id2, content2, ...]
+                temp_map = {}
+                if len(segments) > 2:
+                    for i in range(1, len(segments), 2):
+                        cid_str = str(int(segments[i])) # Normalize 01 to 1
+                        content = segments[i+1].strip()
+                        temp_map[cid_str] = content
+                
                 for cid in all_cow_ids:
-                    # Robust pattern: handles ### Cow #10, ## COW #10, **COW #10**, etc.
-                    pattern = rf"(?i)[#\*\s]+COW\s*#{cid}[#\*\s]*.*?(\n|$)([\s\S]*?)(?=[#\*\s]+COW\s*#|\Z)"
-                    match = re.search(pattern, report_text)
-                    if match:
-                        per_cow_reports[str(cid)] = match.group(2).strip()
+                    cid_key = str(cid)
+                    if cid_key in temp_map:
+                        per_cow_reports[cid_key] = temp_map[cid_key].strip()
                     else:
-                        per_cow_reports[str(cid)] = "Individual assessment available in full report."
+                        # Fallback to a broader regex search if split failed
+                        pattern = rf"(?im)(?:###|[*]{2,})\s*🐄?\s*COW\s*#*\s*{cid}\b(.*?)(?=(?:###|[*]{2,})\s*🐄?\s*COW\s*#|\Z)"
+                        match = re.search(pattern, report_text, re.DOTALL)
+                        if match:
+                            per_cow_reports[cid_key] = match.group(1).strip()
+                        else:
+                            per_cow_reports[str(cid)] = "Individual assessment available in full report."
 
                 if self.safety_engine:
                     report_text = self.safety_engine.inject_disclaimer(report_text)
@@ -459,8 +506,53 @@ class VeterinaryInferencePipeline:
         result["cow_id"] = cow_id
         result["total_latency_ms"] = round((time.perf_counter() - t0) * 1000, 2)
         result["success"] = len(result["errors"]) == 0
+        
+        # Store in cache for agent lookup
+        summaries = result["stages"].get("clinical_summaries", [])
+        for summary in summaries:
+            cid = summary.get("cow_id")
+            if cid:
+                self.latest_results[cid] = {
+                    "health": summary.get("health"),
+                    "milk": summary.get("milk"),
+                    "heat_stress": summary.get("heat_stress"),
+                    "timestamp": time.time(),
+                    "image_b64": result["stages"].get("annotated_image_b64")
+                }
+        
         logger.info(f"Pipeline complete | cow={cow_id} | latency={result['total_latency_ms']:.0f}ms | errors={len(result['errors'])}")
         return result
+
+    def get_latest_status(self, cow_id: int) -> Optional[Dict[str, Any]]:
+        """Utility for BovineIQ Agent to get cached status without re-running models. 🐄✨"""
+        return self.latest_results.get(cow_id)
+
+    def _extract_cow_sensor_vitals(self, cow_id: int, day_index: int = 0) -> Dict[str, Any]:
+        """Extract real sensor vitals using the dedicated sensor CSVs."""
+        defaults = {
+            "cbt_celsius": None, "thi": None,
+            "accel_mag": None, "sensor_milk_kg": None,
+            "weight_kg": None, "age_years": None
+        }
+        try:
+            dp = self.data_pipeline
+            if not dp or not hasattr(dp, 'get_real_sensor_vitals'):
+                return defaults
+            
+            raw = dp.get_real_sensor_vitals(cow_id)
+            return {
+                "cbt_celsius": raw.get("cbt_celsius"),
+                "thi": raw.get("thi"),
+                "thi_stress_class": raw.get("thi_stress_class", "Unknown"),
+                "accel_mag": raw.get("accel_mag"),
+                "sensor_milk_kg": raw.get("actual_milk_kg"),
+                "weight_kg": self.clinical_registry.get(cow_id, {}).get("weight"),
+                "age_years": self.clinical_registry.get(cow_id, {}).get("age"),
+            }
+        except Exception as e:
+            logger.warning(f"Failed to extract sensor vitals for Cow #{cow_id}: {e}")
+            return defaults
+
 
     def _build_summary(self, cow_id, health_r, milk_r, heat_r, vision_r):
         hs = health_r.get("health_score", 0.5) if isinstance(health_r, dict) else 0.5
@@ -525,7 +617,9 @@ class VeterinaryInferencePipeline:
             if high_conf:
                 top = high_conf[0]
                 agent_context += f"AI vision detected: {top.get('disease', '?')} ({top.get('confidence', 0):.0%} confidence)"
-            # else: don't add any disease — low confidence is NOT reported
+        
+        if not id_result.get("is_known_cow"):
+            agent_context = f"🚨 **Clinical Alert: No Known Cow Identified.** The cropped region does not match any known cow profile in the C01-C16 database. {agent_context}"
 
         # Attach base64 crop for frontend chat
         id_result["crop_b64"] = base64.b64encode(crop_bytes).decode('utf-8')

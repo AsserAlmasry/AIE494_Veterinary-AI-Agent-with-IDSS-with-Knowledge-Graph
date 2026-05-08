@@ -17,18 +17,28 @@ logger = logging.getLogger(__name__)
 class Neo4jService:
     """Thread-safe Neo4j wrapper with clinical-decision graph operations."""
 
-    def __init__(self, uri: str, user: str, password: str, database: str = "neo4j"):
+    def __init__(self, uri: str, user: str, password: str, database: Optional[str] = None):
         self._driver = None
         self._database = database
         self._mock_history = {}  # Fallback history storage
         try:
             from neo4j import GraphDatabase
+            # Stage 1: Try Primary (AuraDB)
+            logger.info(f"Connecting to Neo4j: {uri} (User: {user})")
             self._driver = GraphDatabase.driver(uri, auth=(user, password))
             self._driver.verify_connectivity()
-            logger.info(f"Neo4j connected: {uri}")
+            logger.info(f"Neo4j Primary connected: {uri}")
         except Exception as e:
-            logger.warning(f"Neo4j connection failed: {e}. Using IN-MEMORY fallback graph.")
-            self._driver = None
+            logger.warning(f"Neo4j Primary failed: {e}. Trying Stage 2: Localhost...")
+            try:
+                # Stage 2: Try Localhost (Bolt) - Common if user has Desktop running
+                local_uri = "bolt://localhost:7687"
+                self._driver = GraphDatabase.driver(local_uri, auth=("neo4j", password))
+                self._driver.verify_connectivity()
+                logger.info(f"Neo4j Local connected: {local_uri}")
+            except Exception:
+                logger.warning("Neo4j Stage 2 failed. Using Stage 3: IN-MEMORY fallback graph.")
+                self._driver = None
 
     def close(self):
         if self._driver: self._driver.close()
@@ -144,11 +154,11 @@ class Neo4jService:
             return []
 
         return self._run(
-            "MATCH (d:Disease {name: $n})-[r:TREATED_WITH]->(t:Treatment) "
-            "OPTIONAL MATCH (t)-[:HAS_WITHDRAWAL]->(w:WithdrawalPeriod) "
-            "RETURN t.name as treatment, t.drug as drug, t.dosage as dosage, "
-            "r.evidence_level as evidence_level, r.protocol as protocol, "
-            "w.milk_days as withdrawal_milk_days, w.meat_days as withdrawal_meat_days",
+            "MATCH (d:Disease {name: $n})-[r:TREATED_BY]->(t:Treatment) "
+            "OPTIONAL MATCH (t)-[:REQUIRES_DRUG]->(g:Drug) "
+            "RETURN t.name as treatment, g.name as drug, t.protocol as protocol, "
+            "r.evidence_level as evidence_level, "
+            "t.withdrawal_milk_days as withdrawal_milk_days, t.withdrawal_meat_days as withdrawal_meat_days",
             n=disease,
         )
 
@@ -162,9 +172,21 @@ class Neo4jService:
             return []
 
         return self._run(
-            "MATCH (d:Disease {name: $n})-[:DIFFERENTIAL_OF]-(d2:Disease) "
+            "MATCH (d:Disease {name: $n})-[:RELATED_TO]-(d2:Disease) "
             "RETURN d2.name as disease, d2.category as category, d2.severity as severity "
             "LIMIT 5", n=disease,
+        )
+    def get_disease_research(self, disease: str) -> List[Dict]:
+        """Fetch research articles related to a specific disease."""
+        disease = disease.lower().replace(" ", "_")
+        if not self._driver:
+            return []
+
+        return self._run(
+            "MATCH (d:Disease {name: $n})<-[:ABOUT]-(r:Research) "
+            "RETURN r.title as title, r.journal as journal, r.year as year, r.abstract as abstract "
+            "LIMIT 3",
+            n=disease,
         )
 
     def get_cow_history(self, cow_id: int) -> List[Dict]:
